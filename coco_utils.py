@@ -38,7 +38,7 @@ def load_coco_data(base_dir='datasets/coco_captioning',
 
     # Load vocab embedding
     embedding_file = os.path.join(base_dir, 'coco2014_vocab_glove.txt')
-    word_embedding = load_word_embedding(embedding_file, dict_data)
+    word_embedding = load_word_embedding(embedding_file)
     for _, v in dict_data.items():
         assert len(word_embedding) == len(v), "Word embedding has different length from word/id mapping"
     data['word_embedding'] = word_embedding

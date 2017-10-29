@@ -103,4 +103,6 @@ ENV/
 
 data/*
 datasets/*
+!datasets/get_coco_captioning.sh
+!datasets/preprocess.py
 .idea

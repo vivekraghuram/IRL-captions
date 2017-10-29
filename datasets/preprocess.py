@@ -3,9 +3,9 @@ import os
 import numpy as np
 
 
-glove_300_filepath = 'datasets/glove/glove.840B.300d.txt'
-coco2014_vocab_filepath = 'datasets/coco_captioning/coco2014_vocab.json'
-coco2014_glove_300_filepath = 'datasets/coco_captioning/coco2014_vocab_glove.txt'
+glove_300_filepath = 'glove/glove.840B.300d.txt'
+coco2014_vocab_filepath = 'coco_captioning/coco2014_vocab.json'
+coco2014_glove_300_filepath = 'coco_captioning/coco2014_vocab_glove.txt'
 embedding_dim = 300
 
 
