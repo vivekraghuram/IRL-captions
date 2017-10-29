@@ -36,6 +36,14 @@ def load_coco_data(base_dir='datasets/coco_captioning',
         for k, v in dict_data.items():
             data[k] = v
 
+    # Load vocab embedding
+    embedding_file = os.path.join(base_dir, 'coco2014_vocab_glove.txt')
+    word_embedding = load_word_embedding(embedding_file, dict_data)
+    for _, v in dict_data.items():
+        assert len(word_embedding) == len(v), "Word embedding has different length from word/id mapping"
+    data['word_embedding'] = word_embedding
+
+
     train_url_file = os.path.join(base_dir, 'train2014_urls.txt')
     with open(train_url_file, 'r') as f:
         train_urls = np.asarray([line.strip() for line in f])
@@ -54,6 +62,19 @@ def load_coco_data(base_dir='datasets/coco_captioning',
         data['train_image_idxs'] = data['train_image_idxs'][mask]
 
     return data
+
+
+def load_word_embedding(embedding_file):
+    """
+    Load word embedding where k-th row corresponds to embedding of word k
+    :param embedding_file:
+    :return: matrix embedding
+    """
+    embedding = []
+    with open(embedding_file) as data_file:
+        for line in data_file:
+            embedding.append(np.fromstring(line, dtype=float, sep=' '))
+    return np.array(embedding)
 
 
 def decode_captions(captions, idx_to_word):
