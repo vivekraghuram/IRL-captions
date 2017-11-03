@@ -104,6 +104,19 @@ class LSTM(object):
 
     return c, a
 
+  def pseudo_test(self, sess, feed_dict):
+    assert(self.batch_size == targets.shape[0])
+    feed_dict[self.sy_initial_step] = True
+
+    for i in range(self.num_layers):
+      feed_dict[self.sy_hidden_states[i]] = np.zeros((self.batch_size, self.hidden_dim))
+      feed_dict[self.sy_cell_states[i]] = np.zeros((self.batch_size, self.hidden_dim))
+
+    p = sess.run(self.predictions, feed_dict=feed_dict)
+
+    return p
+
+
   def test(self, sess, input_placeholder, feed_dict, max_steps=16):
     """
     sess: Initialized tensorflow session
