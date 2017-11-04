@@ -1,6 +1,6 @@
-wget "http://cs231n.stanford.edu/coco_captioning.zip"
-unzip coco_captioning.zip
-rm coco_captioning.zip
+#wget "http://cs231n.stanford.edu/coco_captioning.zip"
+#unzip coco_captioning.zip
+#rm coco_captioning.zip
 
 wget "http://www-nlp.stanford.edu/data/glove.840B.300d.zip"
 unzip glove.840B.300d.zip
