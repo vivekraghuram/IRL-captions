@@ -1,5 +1,19 @@
 class PreProcessingConstant(object):
 
+    """
+    This assumes coco original data set is in the following directory:
+    - <project-root>
+        - data
+            - annotations
+                - captions_train2014.json
+                - captions_val2014.json
+            - images
+                - train2014
+                    - <image_file>.jpg
+                    - ...
+                - val2014
+    """
+
     data_splits = {'train': 'train2014', 'val': 'val2014'}
     data_directory = 'data'
     annotations_directory = '{}/annotations'.format(data_directory)

@@ -1,7 +1,8 @@
+import h5py
+import numpy as np
+
 from preprocessing.image_feature_extraction import VGG19Featurizer
 from preprocessing.image_feature_extraction import load_image_batch as keras_load_image
-import numpy as np
-import h5py
 
 
 class CocoImageMetaData(object):
@@ -19,14 +20,15 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
     :param image_directory: image directory containing file name described in the image
     :return:
     """
+    print("\nStart pre-processing images at {}".format(image_directory))
 
-    def image_file_path(img):
-        return "{}/{}".format(image_directory, img.file_name)
+    def image_file_path(img_meta_data):
+        return "{}/{}".format(image_directory, img_meta_data.file_name)
 
     batch_size = 5
-    image_feats = []
-    image_original_ids = []
-    image_urls = []
+    all_image_features = []
+    all_image_original_coco_ids = []
+    all_image_urls = []
     max_size = len(all_images_meta)
 
     for i in range(0, max_size, batch_size):
@@ -36,19 +38,20 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
             batch = all_images_meta[i:max_size]
         else:
             batch = all_images_meta[i: i + batch_size]
-        image_original_ids.append([m.original_id for m in batch])
-        image_urls.append([m.coco_url for m in batch])
+        all_image_original_coco_ids.append([m.original_id for m in batch])
+        all_image_urls.append([m.coco_url for m in batch])
         file_path_batch = [image_file_path(m) for m in batch]
         img = keras_load_image(file_path_batch)
         features = img_featurizer.featurize(img)
-        image_feats.append(features)
+        all_image_features.append(features)
 
-    image_feats = np.concatenate(image_feats)
+    all_image_features = np.concatenate(all_image_features)
     flatten = lambda l: [item for sublist in l for item in sublist]
-    image_urls = list(flatten(image_urls))
-    image_original_ids = list(flatten(image_original_ids))
+    all_image_urls = list(flatten(all_image_urls))
+    all_image_original_coco_ids = list(flatten(all_image_original_coco_ids))
 
-    return image_feats, image_urls, image_original_ids
+    print("Done processing {} images!".format(all_image_features.shape))
+    return all_image_features, all_image_urls, all_image_original_coco_ids
 
 
 def write_image_data(image_features, image_urls, image_original_ids, file_prefix=""):
@@ -62,6 +65,8 @@ def write_image_data(image_features, image_urls, image_original_ids, file_prefix
     assert image_features.shape[0] == len(image_original_ids)
     assert image_features.shape[0] == len(image_urls)
 
+    print("\nWriting image data to {}_...".format(file_prefix))
+
     with h5py.File('{}_vgg19_fc2.h5'.format(file_prefix), 'w') as f:
         f.create_dataset('features', data=image_features)
 
@@ -73,25 +78,6 @@ def write_image_data(image_features, image_urls, image_original_ids, file_prefix
         for url in image_urls:
             img_url_f.write(url + "\n")
 
+    print("Done!")
+
     return
-
-
-if __name__ == '__main__':
-
-    from preprocessing.constant import PreProcessingConstant
-    from pycocotools.coco import COCO
-
-    data_split = PreProcessingConstant.data_splits['train']
-
-    output_directory = '{}/{}'.format(PreProcessingConstant.data_output_directory, data_split)
-    ann_file_path = '{}/instances_{}.json'.format(PreProcessingConstant.annotations_directory, data_split)
-    coco = COCO(ann_file_path)
-
-    image_directory_path = '{}/{}'.format(PreProcessingConstant.image_directory, data_split)
-
-    all_image_ids = coco.getImgIds()
-    all_images = [CocoImageMetaData(img) for img in coco.loadImgs(all_image_ids)]
-
-    img_featurizer = VGG19Featurizer()
-    image_feats, image_urls, image_original_ids = preprocess_image(img_featurizer, all_images, image_directory_path)
-    write_image_data(image_feats, image_urls, image_original_ids, file_prefix=output_directory)
