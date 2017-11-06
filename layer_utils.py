@@ -23,3 +23,10 @@ def affine_transform(input_placeholder, output_size, scope):
     with tf.variable_scope(scope):
         out = tf.layers.dense(inputs=input_placeholder, units=output_size, activation=None)
     return out
+
+
+def difference_over_time(xs, scope):
+    with tf.variable_scope(scope):
+        time_first = tf.transpose(xs, (1, 0, 2))
+        diff = tf.scan(lambda x1, x2: x2-x1, time_first)
+        return tf.transpose(diff, (1, 0, 2))
