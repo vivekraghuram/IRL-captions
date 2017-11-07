@@ -27,6 +27,7 @@ def affine_transform(input_placeholder, output_size, scope):
 
 def difference_over_time(xs, scope):
     with tf.variable_scope(scope):
-        time_first = tf.transpose(xs, (1, 0, 2))
-        diff = tf.scan(lambda x1, x2: x2-x1, time_first)
-        return tf.transpose(diff, (1, 0, 2))
+        time_dim = tf.shape(xs)[1]
+        initial = tf.expand_dims(xs[:, 0, :], dim=1)
+        diff = xs[:, 1: time_dim, :] - xs[:, 0:time_dim - 1, :]
+        return tf.concat([initial, diff], axis=1)
