@@ -11,7 +11,9 @@ class NetWorkInput(object):
         pass
 
     def feed(self):
-        return self.feed_buff
+        to_feed = self.feed_buff
+        self.feed_buff = {}
+        return to_feed
 
 
 class CaptionInput(NetWorkInput):
@@ -40,22 +42,19 @@ class CaptionInput(NetWorkInput):
 
 
 class ImageInput(NetWorkInput):
-    def __init__(self, image_feature_dim, hidden_dim):
-        self.hidden_dim = hidden_dim
+    def __init__(self, image_feature_dim):
         self.image_feat_input = tf.placeholder(shape=[None, image_feature_dim], name="image_feat_input",
                                                dtype=tf.float32)
-        self.image_projection = layer_utils.affine_transform(self.image_feat_input, hidden_dim, 'image_proj')
-        self.feed_buff = {}
 
-    def get_projection(self):
-        return self.image_projection
+    def get_image_features(self):
+        return self.image_feat_input
 
     def get_hidden_dim(self):
         return self.hidden_dim
 
-    def pre_feed(self, image_proj):
+    def pre_feed(self, image_features):
         self.feed_buff = {
-            self.image_feat_input: image_proj
+            self.image_feat_input: image_features
         }
 
 
@@ -92,12 +91,6 @@ class Lstm(object):
 
 
 class LstmScalarRewardStrategy(object):
-    class RewardConfig(object):
-
-        def __init__(self, reward_scalar_transformer=None, take_difference=True):
-            self.reward_scalar_transformer = reward_scalar_transformer
-            self.take_difference = take_difference
-
     def __init__(self,
                  lstm_output,
                  reward_config=None
@@ -123,6 +116,12 @@ class LstmScalarRewardStrategy(object):
     def get_rewards(self):
         return self.scalar_rewards
 
+    class RewardConfig(object):
+
+        def __init__(self, reward_scalar_transformer=None, take_difference=True):
+            self.reward_scalar_transformer = reward_scalar_transformer
+            self.take_difference = take_difference
+
 
 class Discriminator(object):
     def __init__(self,
@@ -130,41 +129,53 @@ class Discriminator(object):
                  image_input,
                  metadata_input,
                  reward_config=None,
-                 learning_rate=1e-3
+                 learning_rate=1e-3,
+                 hidden_dim=512
                  ):
         self.caption_input = caption_input
         self.image_input = image_input
         self.metadata_input = metadata_input
         self.reward_config = reward_config
+        self.hidden_dim = hidden_dim
+        self.caption_embedding = caption_input.get_embedding()
 
-        image_projection = image_input.get_projection()
-        caption_embedding = caption_input.get_embedding()
-        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(image_projection * 0, image_projection)
-        lstm = Lstm(image_input.get_hidden_dim(), initial_lstm_state, caption_embedding)
-        reward_strategy = LstmScalarRewardStrategy(lstm.get_output(), reward_config)
-        rewards = reward_strategy.get_rewards()
+        lstm = self._combine_input_to_lstm()
+        rewards = LstmScalarRewardStrategy(lstm.get_output(), reward_config).get_rewards()
 
-        self.loss, self.signed_rewards, self.mean_reward_per_sentence = self.compute_loss(rewards)
+        self.loss, self.masked_reward, self.mean_reward_per_sentence = self._compute_loss(rewards)
         self.update_op = tf.train.AdamOptimizer(learning_rate).minimize(self.loss)
 
-    def compute_loss(self, rewards):
+    def _combine_input_to_lstm(self):
+        image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim,
+                                                        'image_proj')
+        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(image_projection * 0, image_projection)
+        return Lstm(self.hidden_dim, initial_lstm_state, self.caption_input.get_embedding())
+
+    def _compute_loss(self, rewards):
         expanded_signs = self.metadata_input.get_signs()
-        masked_reward = rewards * self.caption_input.get_not_null_numeric_mask()
-        signed_rewards = expanded_signs * masked_reward
-        mean_reward_for_each_sentence = tf.reduce_sum(signed_rewards, axis=1) / self.caption_input.get_not_null_count()
-        mean_reward = tf.reduce_mean(mean_reward_for_each_sentence)
+        unsigned_masked_reward = rewards * self.caption_input.get_not_null_numeric_mask()
+        unsigned_mean_reward = tf.reduce_sum(unsigned_masked_reward, axis=1) / self.caption_input.get_not_null_count()
+        signed_rewards = expanded_signs * unsigned_masked_reward
+        signed_mean_reward_for_each_sentence = tf.reduce_sum(signed_rewards,
+                                                             axis=1) / self.caption_input.get_not_null_count()
+        mean_reward = tf.reduce_mean(signed_mean_reward_for_each_sentence)
         loss = mean_reward * - 1
-        return loss, signed_rewards, mean_reward_for_each_sentence
+        return loss, unsigned_masked_reward, unsigned_mean_reward
+
+    def _get_feed_dict(self):
+        feed_dict = {}
+        for n_input in [self.caption_input, self.image_input, self.metadata_input]:
+            feed_dict.update(n_input.feed())
+        return feed_dict
 
     def train(self, sess):
-        def get_feed_dict():
-            feed_dict = {}
-            for n_input in [self.caption_input, self.image_input, self.metadata_input]:
-                feed_dict.update(n_input.feed())
-            return feed_dict
+        _, loss, masked_reward, mean_reward_per_sentence = sess.run(
+            [self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence],
+            feed_dict=self._get_feed_dict())
 
-        _, loss, signed_rewards, mean_reward_per_sentence = sess.run(
-            [self.update_op, self.loss, self.signed_rewards, self.mean_reward_per_sentence],
-            feed_dict=get_feed_dict())
+        return loss, masked_reward, mean_reward_per_sentence
 
-        return loss, signed_rewards, mean_reward_per_sentence
+    def test(self, sess):
+        loss, masked_reward, mean_reward_per_sentence = sess.run(
+            [self.loss, self.masked_reward, self.mean_reward_per_sentence], feed_dict=self._get_feed_dict())
+        return loss, masked_reward, mean_reward_per_sentence
