@@ -110,6 +110,8 @@ class LstmScalarRewardStrategy(object):
 
         if reward_config.reward_scalar_transformer is None:
             reward_scalar_transformer = lambda x: layer_utils.affine_transform(x, 1, 'hidden_to_reward')
+        else:
+            reward_scalar_transformer = reward_config.reward_scalar_transformer
 
         self.scalar_rewards = tf.squeeze(reward_scalar_transformer(tmp_processing), axis=2)
 
