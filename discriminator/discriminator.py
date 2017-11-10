@@ -182,15 +182,5 @@ class Discriminator(object):
             [self.loss, self.masked_reward, self.mean_reward_per_sentence], feed_dict=self._get_feed_dict())
         return loss, masked_reward, mean_reward_per_sentence
 
-class DiscriminatorWrapper(object):
 
-    def __init__(self, train_data, vocab_data):
-
-        caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID)
-        image_input = ImageInput(image_feature_dim=train_data.image_feature_dim)
-        metadata_input = MetadataInput()
-        reward_config = LstmScalarRewardStrategy.RewardConfig(
-            reward_scalar_transformer=lambda x: tf.nn.sigmoid(layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
-        )
-        self.discr = Discriminator(caption_input, image_input, metadata_input, reward_config=reward_config, hidden_dim=512)
 

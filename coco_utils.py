@@ -27,6 +27,7 @@ class CocoData(object):
 
         assert self.captions_in_word_idx.shape[0] == self.image_idx.shape[0]
         self.data_size = self.image_idx.shape[0]
+        self.max_caption_len = self.captions_in_word_idx[0].shape[0]
 
         self.image_features = data[data_key('features')]
         self.image_urls = data[data_key('urls')]
