@@ -7,6 +7,155 @@ import json
     From coco_utils.py from assignment3
 """
 
+
+def print_meta_data(data_names, data):
+    for (n, d) in zip(data_names, data):
+        if type(d) == np.ndarray:
+            print(n, type(d), d.shape, d.dtype)
+        else:
+            print(n, type(d), len(d))
+
+
+class CocoData(object):
+    def __init__(self, data, data_split):
+        def data_key(key):
+            return "{}_{}".format(data_split, key)
+
+        self.which_split = data_split
+        self.captions_in_word_idx = data[data_key('captions')]
+        self.image_idx = data[data_key('image_idxs')]
+
+        assert self.captions_in_word_idx.shape[0] == self.image_idx.shape[0]
+        self.data_size = self.image_idx.shape[0]
+
+        self.image_features = data[data_key('features')]
+        self.image_urls = data[data_key('urls')]
+
+        assert self.image_features.shape[0] == self.image_urls.shape[0]
+
+        self.image_feature_dim = self.image_features.shape[1]
+
+        print("\nLoaded {} data.".format(data_split))
+        data_names = ["Captions", "Image indices", "Image features", "Image urls"]
+        data = [self.captions_in_word_idx, self.image_idx, self.image_features, self.image_urls]
+        print_meta_data(data_names, data)
+
+    def get_image_features(self, indices):
+        return self.image_features[indices]
+
+    def sample(self, batch_size):
+        mask = np.random.choice(self.data_size, batch_size)
+        captions, image_features, urls = self.get(mask)
+        return captions, image_features, urls
+
+    def get(self, indices):
+        captions = self.captions_in_word_idx[indices]
+        image_idxs = self.image_idx[indices]
+        image_features = self.image_features[image_idxs]
+        urls = self.image_urls[image_idxs]
+        return captions, image_features, urls
+
+    def get_urls_by_data_index(self, indices):
+        image_idxs = self.image_idx[indices]
+        return self.image_urls[image_idxs]
+
+    def get_urls_by_image_index(self, img_idx):
+        return self.image_urls[img_idx]
+
+    def split(self, ratio):
+        print("\nSplitting {} data with ratio {}".format(self.which_split, ratio))
+        split_at = int(self.data_size * ratio)
+        c1, c2 = self.captions_in_word_idx[:split_at], self.captions_in_word_idx[split_at:]
+        i1, i2 = self.image_idx[:split_at], self.image_idx[split_at:]
+
+        def build_data_dict(c, i):
+            d = dict()
+            d['{}_features'.format(self.which_split)] = self.image_features
+            d['{}_urls'.format(self.which_split)] = self.image_urls
+            d['{}_captions'.format(self.which_split)] = c
+            d['{}_image_idxs'.format(self.which_split)] = i
+            return d
+
+        return CocoData(build_data_dict(c1, i1), self.which_split), CocoData(build_data_dict(c2, i2), self.which_split)
+
+
+class VocabData(object):
+    def __init__(self, data):
+        self.word_embedding = data['word_embedding']
+        self.word_to_idx = data['word_to_idx']
+        self.idx_to_word = data['idx_to_word']
+
+        assert len(self.word_to_idx) == len(self.idx_to_word)
+        self.vocab_dim = len(self.word_to_idx)
+
+        print("\nLoaded vocab data.")
+        data_names = ["Embedding", "Word to index", "Index to word"]
+        data = [self.word_embedding, self.word_to_idx, self.idx_to_word]
+        print_meta_data(data_names, data)
+
+        self.START_TOKEN = '<START>'
+        self.END_TOKEN = '<END>'
+        self.NULL_TOKEN = '<NULL>'
+        self.UNK_TOKEN = '<UNK>'
+
+        self.START_ID = self.word_to_idx[self.START_TOKEN]
+        self.END_ID = self.word_to_idx[self.END_TOKEN]
+        self.NULL_ID = self.word_to_idx[self.NULL_TOKEN]
+        self.UNK_ID = self.word_to_idx[self.UNK_TOKEN]
+
+    def embedding(self):
+        return self.word_embedding
+
+    def from_word_to_idx(self, word):
+        if word not in self.word_to_idx:
+            return self.UNK_ID
+        else:
+            return self.word_to_idx[word]
+
+    def from_idx_to_word(self, idx):
+        return self.idx_to_word[idx]
+
+    def decode_captions(self, captions):
+
+        singleton = False
+        if captions.ndim == 1:
+            singleton = True
+            captions = captions[None]
+        decoded = []
+        N, T = captions.shape
+        for i in range(N):
+            words = []
+            for t in range(T):
+                word = self.idx_to_word[captions[i, t]]
+                if word != self.NULL_TOKEN:
+                    words.append(word)
+                if word == self.NULL_TOKEN:
+                    break
+            decoded.append(' '.join(words))
+        if singleton:
+            decoded = decoded[0]
+        return decoded
+
+    def encode_captions(self, captions):
+        max_len = max([len(c) for c in captions])
+        caption_ids = np.ones((len(captions), max_len), dtype=np.int) * self.NULL_ID
+        for i, c in enumerate(captions):
+            for j, tk in enumerate(c):
+                caption_ids[i, j] = self.from_word_to_idx(tk)
+        return caption_ids
+
+
+def load_coco_data_struct(base_dir='datasets/coco_captioning',
+                          max_train=None):
+    data = load_coco_data(base_dir=base_dir, max_train=max_train, pca_features=False)
+
+    vocab_data = VocabData(data)
+    train_data = CocoData(data, "train")
+    val_data = CocoData(data, "val")
+
+    return vocab_data, train_data, val_data
+
+
 def load_coco_data(base_dir='datasets/coco_captioning',
                    max_train=None,
                    pca_features=True):
@@ -42,7 +191,6 @@ def load_coco_data(base_dir='datasets/coco_captioning',
     for _, v in dict_data.items():
         assert len(word_embedding) == len(v), "Word embedding has different length from word/id mapping"
     data['word_embedding'] = word_embedding
-
 
     train_url_file = os.path.join(base_dir, 'train2014_urls.txt')
     with open(train_url_file, 'r') as f:
@@ -96,6 +244,7 @@ def decode_captions(captions, idx_to_word):
     if singleton:
         decoded = decoded[0]
     return decoded
+
 
 def sample_coco_minibatch(data, batch_size=100, split='train'):
     split_size = data['%s_captions' % split].shape[0]
