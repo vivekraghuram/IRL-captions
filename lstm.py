@@ -235,12 +235,14 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
                batch_size=50,
                image_feature_dim=4096,
                n_layers=1,
-               baseline_size=32):
+               baseline_size=32,
+               reward_func=None):
 
     super().__init__(embedding_init, hidden_dim, output_dim, input_dim, learning_rate, batch_size, image_feature_dim)
     self.n_layers = n_layers
     self.baseline_size = baseline_size
     self.seed = 294
+    self.reward_func = reward_func
 
   def build_model(self, activation=None, loaded_mle=False):
     if not loaded_mle:
@@ -275,11 +277,12 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
     self.baseline_update_op = tf.train.AdamOptimizer(self.learning_rate, name='adam_bl').minimize(baseline_loss, name="baseline_update_op")
     tf.add_to_collection("baseline_update_op", self.baseline_update_op)
 
-  def generate_paths(self, sess, data, max_steps=16, num_paths=1000, num_samples=20, gamma=1.0):
+  def generate_paths(self, sess, data, max_steps=16, num_paths=1000, gamma=1.0):
     paths = []
     num_paths = self.batch_size
 
     for count, mini_batch in enumerate(data.training_batches(self.batch_size)):
+      probs = np.zeros((self.batch_size, max_steps), dtype=float)
       actions = np.zeros((self.batch_size, max_steps), dtype=int)
       rewards = np.zeros((self.batch_size, max_steps), dtype=float)
       observation_initial_step = np.zeros((self.batch_size, max_steps), dtype=int)
@@ -288,8 +291,7 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
       observation_cell_state = np.zeros((self.batch_size, max_steps, self.hidden_dim), dtype=float)
       observation_input = np.zeros((self.batch_size, max_steps), dtype=int) # output_dim is vocab_dim
 
-      image_features, caption_input, captions_GT, keys = mini_batch
-      cand_list = []
+      image_features, caption_input, captions_GT, img_keys = mini_batch
 
       observation_initial_step[:, 0] = 1
 
@@ -302,107 +304,13 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
       }
 
       for i in range(max_steps):
-        ac, rs = sess.run([self.sampled_ac, self.rnn_state], feed_dict=feed_dict)
+        ac, rs, lt = sess.run([self.sampled_ac, self.rnn_state, self.logits], feed_dict=feed_dict)
 
-        actions[:, i] = ac[:, 0]
-        observation_input[:, i] = feed_dict[self.sy_input][:, 0]
-        observation_image_features[:, i, :] = feed_dict[self.sy_image_feat_input]
-        observation_hidden_state[:, i, :] = feed_dict[self.sy_hidden_state]
-        observation_cell_state[:, i, :] = feed_dict[self.sy_cell_state]
-
-        for j in range(num_samples):
-          actions[:, i+1:max_steps] = np.random.randint(0, self.output_dim, size=(self.batch_size, max_steps - i - 1))
-
-          candidates = data.decode(actions)
-          assert(len(candidates) == len(keys))
-          for idx, cap in enumerate(candidates):
-            cand_list.append({
-              'image_id': keys[idx],
-              'caption': cap
-            })
-
-        feed_dict[self.sy_initial_step] = False
-        feed_dict[self.sy_hidden_state] = rs[0]
-        feed_dict[self.sy_cell_state] = rs[1]
-        feed_dict[self.sy_input] = ac
-
-      # print(cand_list[-1])
-      # print(captions_GT[cand_list[-1]['image_id']])
-      scorer = ciderEval(captions_GT, cand_list, "coco-val-df")
-      scores = scorer.evaluate()
-      reshaped_scores = np.reshape(scores, (max_steps, num_samples, self.batch_size))
-      rewards = np.max(np.swapaxes(np.swapaxes(reshaped_scores, 1, 2), 0, 1), axis=2) # Should this be max instead of mean?
-      end_mask = 1 - np.cumsum(actions == data.END_ID, axis=1)
-
-      path = {
-        "actions" : actions,
-        "rewards" : rewards,
-        "observation_initial_step" : observation_initial_step,
-        "observation_input" : observation_input,
-        "observation_image_features" : observation_image_features,
-        "observation_hidden_state" : observation_hidden_state,
-        "observation_cell_state" : observation_cell_state,
-        "end_mask" : end_mask
-      }
-
-      paths.append(path)
-      if (count + 1) * self.batch_size >= num_paths:
-        break
-
-    # Build arrays for observation, action for the policy gradient update by concatenating
-    # across paths
-    if len(paths) > 1:
-      ob_initial_step = np.concatenate([path["observation_initial_step"] for path in paths])
-      ob_input = np.concatenate([path["observation_input"] for path in paths])
-      ob_image_features = np.concatenate([path["observation_image_features"] for path in paths])
-      ob_hidden_state = np.concatenate([path["observation_hidden_state"] for path in paths])
-      ob_cell_state = np.concatenate([path["observation_cell_state"] for path in paths])
-      actions = np.concatenate([path["actions"] for path in paths])
-      rewards = np.concatenate([path["rewards"] for path in paths])
-      end_masks = np.concatenate([path["end_mask"] for path in paths])
-    else:
-      ob_initial_step = paths[0]["observation_initial_step"]
-      ob_input = paths[0]["observation_input"]
-      ob_image_features = paths[0]["observation_image_features"]
-      ob_hidden_state = paths[0]["observation_hidden_state"]
-      ob_cell_state = paths[0]["observation_cell_state"]
-      actions = paths[0]["actions"]
-      rewards = paths[0]["rewards"]
-      end_masks = paths[0]["end_mask"]
-
-    reward_to_go = rewards#np.flip(np.cumsum(np.flip(rewards, 1), 1), 1) # need to flip since cumsum begins from front
-
-    return ob_initial_step, ob_input, ob_image_features, ob_hidden_state, ob_cell_state, actions, reward_to_go, end_masks
-
-  def generate_smart_paths(self, sess, data, max_steps=16, num_paths=1000, num_samples=10, gamma=1.0):
-    paths = []
-    num_paths = self.batch_size
-
-    for count, mini_batch in enumerate(data.training_batches(self.batch_size)):
-      actions = np.zeros((self.batch_size, max_steps), dtype=int)
-      rewards = np.zeros((self.batch_size, max_steps), dtype=float)
-      observation_initial_step = np.zeros((self.batch_size, max_steps), dtype=int)
-      observation_image_features = np.zeros((self.batch_size, max_steps, self.image_feature_dim), dtype=float)
-      observation_hidden_state = np.zeros((self.batch_size, max_steps, self.hidden_dim), dtype=float)
-      observation_cell_state = np.zeros((self.batch_size, max_steps, self.hidden_dim), dtype=float)
-      observation_input = np.zeros((self.batch_size, max_steps), dtype=int) # output_dim is vocab_dim
-
-      image_features, caption_input, captions_GT, keys = mini_batch
-      cand_list = []
-
-      observation_initial_step[:, 0] = 1
-
-      feed_dict = {
-        self.sy_input            : caption_input,
-        self.sy_image_feat_input : image_features,
-        self.sy_hidden_state     : np.zeros((self.batch_size, self.hidden_dim)), # Dummy filler
-        self.sy_cell_state       : np.zeros((self.batch_size, self.hidden_dim)), # Dummy filler
-        self.sy_initial_step     : True
-      }
-
-      for i in range(max_steps):
-        ac, rs = sess.run([self.sampled_ac, self.rnn_state], feed_dict=feed_dict)
-
+        exp_lt = np.exp(np.reshape(lt, (self.batch_size * lt.shape[1], self.output_dim)))
+        softmax_lt = exp_lt / np.sum(exp_lt, axis=1, keepdims=True)
+        # print(softmax_lt.shape)
+        # print(ac.shape)
+        probs[:, i] = softmax_lt[np.arange(probs.shape[0]), ac[:, 0]]
         actions[:, i] = ac[:, 0]
         observation_input[:, i] = feed_dict[self.sy_input][:, 0]
         observation_image_features[:, i, :] = feed_dict[self.sy_image_feat_input]
@@ -414,53 +322,25 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
         feed_dict[self.sy_cell_state] = rs[1]
         feed_dict[self.sy_input] = ac
 
-      for i in range(max_steps):
-        for j in range(num_samples):
-          sampled_actions = np.zeros((self.batch_size, max_steps), dtype=int)
-          sampled_actions[:, 0:i+1] = actions[:, 0:i+1]
-
-          if i + 1 < max_steps:
-            feed_dict[self.sy_initial_step] = False
-            feed_dict[self.sy_input] = actions[:, i:i+1]
-            feed_dict[self.sy_hidden_state] = observation_hidden_state[:, i+1, :]
-            feed_dict[self.sy_cell_state] = observation_cell_state[:, i+1, :]
-            feed_dict[self.sy_image_feat_input] = observation_image_features[:, i+1, :]
-
-            for k in range(i + 1, max_steps):
-              ac, rs = sess.run([self.sampled_ac, self.rnn_state], feed_dict=feed_dict)
-
-              feed_dict[self.sy_hidden_state] = rs[0]
-              feed_dict[self.sy_cell_state] = rs[1]
-              feed_dict[self.sy_input] = ac
-
-              sampled_actions[:, k] = ac[:, 0]
-
-          candidates = data.decode(sampled_actions)
-          assert(len(candidates) == len(keys))
-          for idx, cap in enumerate(candidates):
-            cand_list.append({
-              'image_id': keys[idx],
-              'caption': cap
-            })
-
-      print(cand_list[-1])
-      print(captions_GT[cand_list[-1]['image_id']])
-      scorer = ciderEval(captions_GT, cand_list, "coco-val-df")
-      scores = scorer.evaluate()
-      reshaped_scores = np.reshape(scores, (max_steps, num_samples, self.batch_size))
-      rewards = np.mean(np.swapaxes(np.swapaxes(reshaped_scores, 1, 2), 0, 1), axis=2) # Should this be max instead of mean?
       end_mask = 1 - np.cumsum(actions == data.END_ID, axis=1)
 
       path = {
+        "keys" : [int(key) for key in img_keys],
+        "probs" : probs,
         "actions" : actions,
-        "rewards" : rewards,
         "observation_initial_step" : observation_initial_step,
         "observation_input" : observation_input,
         "observation_image_features" : observation_image_features,
         "observation_hidden_state" : observation_hidden_state,
         "observation_cell_state" : observation_cell_state,
-        "end_mask" : end_mask
+        "end_mask" : end_mask,
+        "captions": data.decode(actions)
       }
+
+      if self.reward_func:
+        path["rewards"] = self.discriminator_reward(sess, data, path)
+      else:
+        path["rewards"] = self.generate_cidre_rewards(sess, data, path, img_keys, captions_GT)
 
       paths.append(path)
       if (count + 1) * self.batch_size >= num_paths:
@@ -468,31 +348,84 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
 
     # Build arrays for observation, action for the policy gradient update by concatenating
     # across paths
-    if len(paths) > 1:
-      ob_initial_step = np.concatenate([path["observation_initial_step"] for path in paths])
-      ob_input = np.concatenate([path["observation_input"] for path in paths])
-      ob_image_features = np.concatenate([path["observation_image_features"] for path in paths])
-      ob_hidden_state = np.concatenate([path["observation_hidden_state"] for path in paths])
-      ob_cell_state = np.concatenate([path["observation_cell_state"] for path in paths])
-      actions = np.concatenate([path["actions"] for path in paths])
-      rewards = np.concatenate([path["rewards"] for path in paths])
-      end_masks = np.concatenate([path["end_mask"] for path in paths])
-    else:
-      ob_initial_step = paths[0]["observation_initial_step"]
-      ob_input = paths[0]["observation_input"]
-      ob_image_features = paths[0]["observation_image_features"]
-      ob_hidden_state = paths[0]["observation_hidden_state"]
-      ob_cell_state = paths[0]["observation_cell_state"]
-      actions = paths[0]["actions"]
-      rewards = paths[0]["rewards"]
-      end_masks = paths[0]["end_mask"]
+    paths_output = {}
+    for key in paths[0].keys():
+      if len(paths) > 1:
+        paths_output[key] = np.concatenate([path[key] for path in paths])
+      else:
+        paths_output[key] = paths[0][key]
 
-    reward_to_go = rewards#np.flip(np.cumsum(np.flip(rewards, 1), 1), 1) # need to flip since cumsum begins from front
+    # reward_to_go = np.flip(np.cumsum(np.flip(rewards, 1), 1), 1) # need to flip since cumsum begins from front
 
-    return ob_initial_step, ob_input, ob_image_features, ob_hidden_state, ob_cell_state, actions, reward_to_go, end_masks
+    return paths_output
+
+  def generate_cidre_rewards(self, sess, data, path, keys, captions_GT, num_samples=10):
+
+    actions = path["actions"]
+    observation_image_features = path["observation_image_features"]
+    observation_hidden_state = path["observation_hidden_state"]
+    observation_cell_state = path["observation_cell_state"]
+    max_steps = actions.shape[1]
+
+    cand_list = []
+
+    for i in range(max_steps):
+      for j in range(num_samples):
+        sampled_actions = np.zeros((self.batch_size, max_steps), dtype=int)
+        sampled_actions[:, 0:i+1] = actions[:, 0:i+1]
+
+        if i + 1 < max_steps:
+          feed_dict = {
+            self.sy_input            : actions[:, i:i+1],
+            self.sy_image_feat_input : observation_image_features[:, i+1, :],
+            self.sy_hidden_state     : observation_hidden_state[:, i+1, :],
+            self.sy_cell_state       : observation_cell_state[:, i+1, :],
+            self.sy_initial_step     : False
+          }
+
+          for k in range(i + 1, max_steps):
+            ac, rs = sess.run([self.sampled_ac, self.rnn_state], feed_dict=feed_dict)
+
+            feed_dict[self.sy_hidden_state] = rs[0]
+            feed_dict[self.sy_cell_state] = rs[1]
+            feed_dict[self.sy_input] = ac
+
+            sampled_actions[:, k] = ac[:, 0]
+
+        candidates = data.decode(sampled_actions)
+        assert(len(candidates) == len(keys))
+        for idx, cap in enumerate(candidates):
+          cand_list.append({
+            'image_id': keys[idx],
+            'caption': cap
+          })
+
+    # print(cand_list[-1])
+    # print(captions_GT[cand_list[-1]['image_id']])
+    scorer = ciderEval(captions_GT, cand_list, "coco-val-df")
+    scores = scorer.evaluate()
+    reshaped_scores = np.reshape(scores, (max_steps, num_samples, self.batch_size))
+    rewards = np.mean(np.swapaxes(np.swapaxes(reshaped_scores, 1, 2), 0, 1), axis=2) # Should this be max instead of mean?
+    return rewards
+
+  def discriminator_reward(self, sess, data, path, keys):
+    image_idxs = path["keys"]
+    captions = path["captions"]
+    return self.reward_func(sess, image_idxs, captions, image_idx_from_training=True)
 
   def train(self, sess, data):
-    ob_init_step, ob_in, ob_img_feat, ob_hid_state, ob_cell_state, actions, q_n, end_masks = self.generate_smart_paths(sess, data)
+    paths_output = self.generate_paths(sess, data)
+
+    ob_init_step = paths_output["observation_initial_step"]
+    ob_in = paths_output["observation_input"]
+    ob_img_feat = paths_output["observation_image_features"]
+    ob_hid_state = paths_output["observation_hidden_state"]
+    ob_cell_state = paths_output["observation_cell_state"]
+    actions = paths_output["actions"]
+    q_n = paths_output["rewards"]
+    probs = paths_output["probs"]
+    img_idxs = paths_output["keys"]
+    captions = paths_output["captions"]
 
     b_n = np.zeros(q_n.shape)
     for i in range(b_n.shape[1]):
@@ -521,7 +454,8 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
                                                                       })
       losses.append(loss_val)
 
-    return losses, actions, q_n, adv_n
+
+    return captions, np.prod(probs, axis=1), img_idxs, q_n
 
   def load_model(self, sess, modelname, is_PG=False):
     MaxLikelihoodLSTM.load_model(self, sess, modelname)
