@@ -3,6 +3,10 @@ import tensorflow as tf
 import layer_utils
 
 
+def get_tensor_by_name(graph, name, index=0):
+    return graph.get_tensor_by_name("{}:{}".format(name, index))
+
+
 class NetWorkInput(object):
     def __init__(self):
         self.feed_buff = {}
@@ -17,13 +21,25 @@ class NetWorkInput(object):
 
 
 class CaptionInput(NetWorkInput):
-    def __init__(self, word_embedding_init, null_id):
-        self.caption_input = tf.placeholder(shape=[None, None], name="caption_input", dtype=tf.int32)
-        embedding_init = tf.constant(word_embedding_init, dtype=tf.float32)
-        embedding = tf.get_variable("embedding", initializer=embedding_init)
-        self.word_embedding = tf.nn.embedding_lookup(embedding, self.caption_input, name="embedding_lookup")
-        self.sy_not_null_mask = tf.placeholder(shape=[None, None], name="mask_not_null", dtype=tf.bool)
-        self.null_id = null_id
+    def __init__(self, word_embedding_init, null_id, graph=None):
+
+        caption_input_tname = "caption_input"
+        embedding_tname = "embedding"
+        lookup_tname = "embedding_lookup"
+        mask_not_null_tname = "mask_not_null"
+        if graph is not None:
+            self.caption_input = get_tensor_by_name(graph, caption_input_tname)
+            self.word_embedding = get_tensor_by_name(graph, lookup_tname)
+            self.embedding = get_tensor_by_name(graph, embedding_tname)
+            self.sy_not_null_mask = get_tensor_by_name(graph, mask_not_null_tname)
+            self.null_id = null_id
+        else:
+            self.caption_input = tf.placeholder(shape=[None, None], name=caption_input_tname, dtype=tf.int32)
+            embedding_init = tf.constant(word_embedding_init, dtype=tf.float32)
+            self.embedding = tf.get_variable(name=embedding_tname, initializer=embedding_init)
+            self.word_embedding = tf.nn.embedding_lookup(self.embedding, self.caption_input, name=lookup_tname)
+            self.sy_not_null_mask = tf.placeholder(shape=[None, None], name=mask_not_null_tname, dtype=tf.bool)
+            self.null_id = null_id
 
     def get_embedding(self):
         return self.word_embedding
@@ -42,9 +58,15 @@ class CaptionInput(NetWorkInput):
 
 
 class ImageInput(NetWorkInput):
-    def __init__(self, image_feature_dim):
-        self.image_feat_input = tf.placeholder(shape=[None, image_feature_dim], name="image_feat_input",
-                                               dtype=tf.float32)
+    def __init__(self, image_feature_dim, graph=None):
+
+        image_input_tname = "image_feat_input"
+
+        if graph is not None:
+            self.image_feat_input = get_tensor_by_name(graph, image_input_tname)
+        else:
+            self.image_feat_input = tf.placeholder(shape=[None, image_feature_dim], name=image_input_tname,
+                                                   dtype=tf.float32)
 
     def get_image_features(self):
         return self.image_feat_input
@@ -59,8 +81,12 @@ class ImageInput(NetWorkInput):
 
 
 class MetadataInput(NetWorkInput):
-    def __init__(self):
-        self.labels = tf.placeholder(shape=[None], name="labels", dtype=tf.int32)
+    def __init__(self, graph=None):
+        label_tname = "labels"
+        if graph is not None:
+            self.labels = get_tensor_by_name(graph, label_tname)
+        else:
+            self.labels = tf.placeholder(shape=[None], name=label_tname, dtype=tf.int32)
 
     def get_labels(self):
         return self.labels
@@ -81,10 +107,14 @@ class MetadataInput(NetWorkInput):
 class Lstm(object):
     def __init__(self, hidden_dim, initial_state, lstm_input):
         self.hidden_dim = hidden_dim
-        cell = tf.nn.rnn_cell.LSTMCell(hidden_dim)
-        self.lstm_outputs, self.lstm_states = tf.nn.dynamic_rnn(cell, lstm_input,
-                                                                time_major=False, dtype=tf.float32,
-                                                                initial_state=initial_state)
+
+        with tf.variable_scope("lstm_output"):
+            cell = tf.nn.rnn_cell.LSTMCell(hidden_dim)
+            self.lstm_outputs, _ = tf.nn.dynamic_rnn(cell, lstm_input,
+                                                     time_major=False, dtype=tf.float32,
+                                                     initial_state=initial_state)
+
+
 
     def get_output(self):
         return self.lstm_outputs
@@ -113,7 +143,8 @@ class LstmScalarRewardStrategy(object):
         else:
             reward_scalar_transformer = reward_config.reward_scalar_transformer
 
-        self.scalar_rewards = tf.squeeze(reward_scalar_transformer(tmp_processing), axis=2)
+        self.scalar_rewards = tf.squeeze(reward_scalar_transformer(tmp_processing), axis=2, name="scalar_rewards")
+
 
     def get_rewards(self):
         return self.scalar_rewards
@@ -132,24 +163,36 @@ class Discriminator(object):
                  metadata_input,
                  reward_config=None,
                  learning_rate=1e-3,
-                 hidden_dim=512
+                 hidden_dim=512,
+                 graph=None
                  ):
         self.caption_input = caption_input
         self.image_input = image_input
         self.metadata_input = metadata_input
         self.reward_config = reward_config
         self.hidden_dim = hidden_dim
-        self.caption_embedding = caption_input.get_embedding()
 
-        lstm = self._combine_input_to_lstm()
-        rewards = LstmScalarRewardStrategy(lstm.get_output(), reward_config).get_rewards()
+        max_reward_opt_tname = "adam_max_reward"
+        rewards_loss_collection_tname = "rewards_and_loss"
 
-        self.loss, self.masked_reward, self.mean_reward_per_sentence = self._compute_loss(rewards)
-        self.update_op = tf.train.AdamOptimizer(learning_rate).minimize(self.loss)
+        if graph is not None:
+            reward_tensors = graph.get_collection(rewards_loss_collection_tname)
+            self.loss = reward_tensors[0]
+            self.masked_reward = reward_tensors[1]
+            self.mean_reward_per_sentence = reward_tensors[2]
+
+            self.update_op = graph.get_operation_by_name(max_reward_opt_tname)
+        else:
+            lstm = self._combine_input_to_lstm()
+            rewards = LstmScalarRewardStrategy(lstm.get_output(), reward_config).get_rewards()
+            rewards_and_loss = self._compute_loss(rewards)
+            self.loss, self.masked_reward, self.mean_reward_per_sentence = rewards_and_loss
+            [tf.add_to_collection(rewards_loss_collection_tname, t) for t in rewards_and_loss]
+
+            self.update_op = tf.train.AdamOptimizer(learning_rate, name=max_reward_opt_tname).minimize(self.loss)
 
     def _combine_input_to_lstm(self):
-        image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim,
-                                                        'image_proj')
+        image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim, 'image_proj')
         initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(image_projection * 0, image_projection)
         return Lstm(self.hidden_dim, initial_lstm_state, self.caption_input.get_embedding())
 
@@ -182,5 +225,6 @@ class Discriminator(object):
             [self.loss, self.masked_reward, self.mean_reward_per_sentence], feed_dict=self._get_feed_dict())
         return loss, masked_reward, mean_reward_per_sentence
 
-
-
+    def save_model(self, sess, model_name):
+        saver = tf.train.Saver()
+        saver.save(sess, model_name)
