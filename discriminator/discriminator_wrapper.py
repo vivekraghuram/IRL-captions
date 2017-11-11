@@ -5,6 +5,7 @@ import tensorflow as tf
 import layer_utils
 from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, Discriminator
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
+from discriminator.mini_batcher import MiniBatcher, MixedMiniBatcher
 from image_utils import image_from_url
 
 
@@ -101,9 +102,10 @@ class DiscriminatorWrapper(object):
         caption_word_idx = self.vocab_data.encode_captions(captions)
         given_size = len(captions)
 
+        # zero label indicating sampled
         new_dat = (img_idxs, caption_word_idx, np.zeros(given_size))
-        mixed_sampled_batcher = self.demo_batcher.mix_new_data(new_dat, mix_ratio=1)
-
+        new_batcher = MiniBatcher(new_dat)
+        mixed_sampled_batcher = MixedMiniBatcher([new_batcher, self.sampled_batcher], [0.5, 0.5])
         batch_size = given_size
 
         return self.train(sess, self.demo_batcher, mixed_sampled_batcher, iter_num, batch_size)
