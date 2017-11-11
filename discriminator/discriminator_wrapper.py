@@ -1,25 +1,43 @@
-import layer_utils
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
-from image_utils import image_from_url
+import layer_utils
 from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, Discriminator
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
+from image_utils import image_from_url
 
 
 class DiscriminatorWrapper(object):
-    def __init__(self, train_data, val_data, vocab_data):
 
+    def __init__(self, train_data, val_data, vocab_data, load_session=None, saved_model_name=None, model_base_dir="models/discr"):
+
+        self.model_base_dir = model_base_dir
         # Build graph
-        caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID)
-        image_input = ImageInput(image_feature_dim=train_data.image_feature_dim)
-        metadata_input = MetadataInput()
-        reward_config = LstmScalarRewardStrategy.RewardConfig(
-            reward_scalar_transformer=lambda x: tf.nn.sigmoid(layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
-        )
-        self.discr = Discriminator(caption_input, image_input, metadata_input, reward_config=reward_config,
-                                   hidden_dim=512)
+        if saved_model_name is not None:
+            saver = tf.train.import_meta_graph(
+                '{}/{}.meta'.format(model_base_dir, saved_model_name))
+            saver.restore(load_session, tf.train.latest_checkpoint(model_base_dir))
+            graph = load_session.graph
+            caption_input = CaptionInput(word_embedding_init=None, null_id=vocab_data.NULL_ID, graph=graph)
+            image_input = ImageInput(image_feature_dim=train_data.image_feature_dim, graph=graph)
+            metadata_input = MetadataInput(graph=graph)
+            reward_config = LstmScalarRewardStrategy.RewardConfig(
+                reward_scalar_transformer=lambda x: tf.nn.sigmoid(
+                    layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
+            )
+            self.discr = Discriminator(caption_input, image_input, metadata_input, reward_config=reward_config,
+                                       hidden_dim=512, graph=graph)
+        else:
+            caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID)
+            image_input = ImageInput(image_feature_dim=train_data.image_feature_dim)
+            metadata_input = MetadataInput()
+            reward_config = LstmScalarRewardStrategy.RewardConfig(
+                reward_scalar_transformer=lambda x: tf.nn.sigmoid(
+                    layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
+            )
+            self.discr = Discriminator(caption_input, image_input, metadata_input, reward_config=reward_config,
+                                       hidden_dim=512)
 
         self.train_data = train_data
         self.val_data = val_data
@@ -177,3 +195,6 @@ class DiscriminatorWrapper(object):
         if to_examine:
             self.examine(self.val_data, image_idx_batch, caption_batch, reward_per_token, mean_reward)
         return loss
+
+    def save_model(self, sess, model_name):
+        self.discr.save_model(sess, model_name='{}/{}'.format(self.model_base_dir, model_name))
