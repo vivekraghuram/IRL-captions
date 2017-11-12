@@ -119,7 +119,7 @@ class DiscriminatorWrapper(object):
         demo_or_sampled_batch = np.concatenate([demo_or_sampled_batch1, demo_or_sampled_batch2], axis=0)
         return image_idx_batch, caption_batch, demo_or_sampled_batch
 
-    def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=True):
+    def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=False):
         captions = [c.split() for c in caption_sentences]
 
         if image_idx_from_training:

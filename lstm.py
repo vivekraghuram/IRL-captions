@@ -10,25 +10,37 @@ class GenericLSTM(object):
                output_dim=1004,
                input_dim=512,
                learning_rate=5e-5,
-               batch_size=50):
+               batch_size=50,
+               scope_name="GenericLSTM"):
 
     self.hidden_dim = hidden_dim
     self.output_dim = output_dim # vocab_dim
     self.input_dim = input_dim
     self.learning_rate = learning_rate
     self.batch_size = batch_size
+    self.scope_name = scope_name
 
-  def build_model(self, activation=None):
-    initial_state = self.build_state()
-    cell = self.build_cell()
-    input_layer = self.build_input()
+  def build_model(self, activation=None, scope_name=None, no_scope=False):
+    def _build_model():
+      initial_state = self.build_state()
+      cell = self.build_cell()
+      input_layer = self.build_input()
 
-    rnn_output, self.rnn_state = tf.nn.dynamic_rnn(cell, input_layer, initial_state=initial_state)
-    self.logits = tf.layers.dense(inputs=rnn_output, units=self.output_dim, activation=activation, name="rnn_logits")
-    self.rnn_state = tf.identity(self.rnn_state, name="rnn_state")
-    tf.add_to_collection("rnn_logits", self.logits)
+      rnn_output, self.rnn_state = tf.nn.dynamic_rnn(cell, input_layer, initial_state=initial_state)
+      self.logits = tf.layers.dense(inputs=rnn_output, units=self.output_dim, activation=activation, name="rnn_logits")
+      self.rnn_state = tf.identity(self.rnn_state, name="rnn_state")
+      tf.add_to_collection("rnn_logits", self.logits)
 
-    self.build_loss()
+      self.build_loss()
+
+    if scope_name is None:
+      scope = self.scope_name
+
+    if no_scope:
+      _build_model()
+    else:
+      with tf.variable_scope(scope) as scope:
+        _build_model()
 
   def build_state(self):
     self.sy_initial_step = tf.placeholder(shape=[], name="sy_initial_step", dtype=tf.bool)
@@ -42,7 +54,7 @@ class GenericLSTM(object):
     return self.sy_input
 
   def build_cell(self):
-    return tf.contrib.rnn.LSTMBlockCell(self.hidden_dim, forget_bias=0.0)
+    return tf.contrib.rnn.LSTMCell(self.hidden_dim, forget_bias=0.0)
 
   def build_loss(self):
     raise NotImplementedError
@@ -51,18 +63,22 @@ class GenericLSTM(object):
     saver = tf.train.Saver()
     saver.save(sess, 'models/%s'%(modelname))
 
-  def load_model(self, sess, modelname):
-    loader = tf.train.import_meta_graph('%s.meta'%modelname)
-    loader.restore(sess, modelname)
+  def load_model(self, sess, modelname, scope_name=None, restore_session=True):
+    if restore_session:
+      loader = tf.train.import_meta_graph('%s.meta'%modelname)
+      loader.restore(sess, modelname)
+
+    if scope_name is None:
+      scope_name = self.scope_name
 
     graph = tf.get_default_graph()
-    self.sy_input = graph.get_tensor_by_name("sy_input:0")
+    self.sy_input = graph.get_tensor_by_name("%s/sy_input:0" % scope_name)
 
-    self.sy_hidden_state = graph.get_tensor_by_name("sy_hidden_state:0")
-    self.sy_cell_state = graph.get_tensor_by_name("sy_cell_state:0")
-    self.sy_initial_step = graph.get_tensor_by_name("sy_initial_step:0")
+    self.sy_hidden_state = graph.get_tensor_by_name("%s/sy_hidden_state:0" % scope_name)
+    self.sy_cell_state = graph.get_tensor_by_name("%s/sy_cell_state:0" % scope_name)
+    self.sy_initial_step = graph.get_tensor_by_name("%s/sy_initial_step:0" % scope_name)
 
-    self.rnn_state = graph.get_tensor_by_name("rnn_state:0")
+    self.rnn_state = graph.get_tensor_by_name("%s/rnn_state:0" % scope_name)
     self.logits = tf.get_collection("rnn_logits")[0]
 
 
@@ -81,11 +97,13 @@ class MaxLikelihoodLSTM(GenericLSTM):
                input_dim=512,
                learning_rate=5e-5,
                batch_size=50,
-               image_feature_dim=4096):
+               image_feature_dim=4096,
+               scope_name="MaxLikelihoodLSTM"):
 
     super().__init__(hidden_dim, output_dim, input_dim, learning_rate, batch_size)
     self.embedding_init = embedding_init
     self.image_feature_dim = image_feature_dim
+    self.scope_name = scope_name
 
   def build_state(self):
     recurrent_state = GenericLSTM.build_state(self)
@@ -130,24 +148,27 @@ class MaxLikelihoodLSTM(GenericLSTM):
     num_correct_pred = tf.reduce_sum(tf.cast(correct_pred, tf.float32) * self.sy_target_mask)
     self.accuracy = tf.divide(num_correct_pred, tf.reduce_sum(self.sy_target_mask), name="accuracy")
 
-  def load_model(self, sess, modelname):
-    GenericLSTM.load_model(self, sess, modelname)
+  def load_model(self, sess, modelname, scope_name=None, restore_session=True):
+    super().load_model(sess, modelname, scope_name, restore_session)
+
+    if scope_name is None:
+      scope_name = self.scope_name
 
     graph = tf.get_default_graph()
-    self.sy_image_feat_input = graph.get_tensor_by_name("sy_image_feat_input:0")
+    self.sy_image_feat_input = graph.get_tensor_by_name("%s/sy_image_feat_input:0" % scope_name)
 
-    self.sy_target = graph.get_tensor_by_name("sy_target:0")
-    self.sy_target_mask = graph.get_tensor_by_name("sy_target_mask:0")
+    self.sy_target = graph.get_tensor_by_name("%s/sy_target:0" % scope_name)
+    self.sy_target_mask = graph.get_tensor_by_name("%s/sy_target_mask:0" % scope_name)
 
     # self.initial_hidden_state = tf.get_collection("image_proj")[0]
-    self.initial_hidden_state = graph.get_tensor_by_name("initial_hidden_state:0")
-    self.initial_cell_state = graph.get_tensor_by_name("initial_cell_state:0")
+    self.initial_hidden_state = graph.get_tensor_by_name("%s/initial_hidden_state:0" % scope_name)
+    self.initial_cell_state = graph.get_tensor_by_name("%s/initial_cell_state:0" % scope_name)
 
-    self.cross_entropy = graph.get_tensor_by_name("cross_entropy:0")
+    self.cross_entropy = graph.get_tensor_by_name("%s/cross_entropy:0" % scope_name)
     self.update_op = tf.get_collection("update_op")[0]
 
-    self.predictions = graph.get_tensor_by_name("predictions:0")
-    self.accuracy = graph.get_tensor_by_name("accuracy:0")
+    self.predictions = graph.get_tensor_by_name("%s/predictions:0" % scope_name)
+    self.accuracy = graph.get_tensor_by_name("%s/accuracy:0" % scope_name)
 
   def train(self, sess, data, max_iterations=200):
     """
@@ -236,22 +257,30 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
                image_feature_dim=4096,
                n_layers=1,
                baseline_size=32,
-               reward_func=None):
+               reward_func=None,
+               scope_name="PolicyGradientLSTM"):
 
     super().__init__(embedding_init, hidden_dim, output_dim, input_dim, learning_rate, batch_size, image_feature_dim)
     self.n_layers = n_layers
     self.baseline_size = baseline_size
     self.seed = 294
     self.reward_func = reward_func
+    self.scope_name = scope_name
 
-  def build_model(self, activation=None, loaded_mle=False):
-    if not loaded_mle:
-      self.sy_target = tf.placeholder(shape=[self.batch_size, None], name="sy_target", dtype=tf.int64)
-      super().build_model(activation)
-    else:
-      self.build_loss()
+  def build_model(self, activation=None, scope_name=None, loaded_mle=False):
+    if scope_name is None:
+      scope_name = self.scope_name
 
-    self.build_baseline()
+    with tf.variable_scope(scope_name) as scope:
+
+      if not loaded_mle:
+        self.sy_target = tf.placeholder(shape=[self.batch_size, None], name="sy_target", dtype=tf.int64)
+        super().build_model(activation, no_scope=True)
+      else:
+        self.build_loss()
+
+      self.build_baseline()
+
 
   def build_loss(self):
     multinomial_logits = tf.reshape(self.logits, (self.batch_size * tf.shape(self.logits)[1], self.output_dim))
@@ -355,7 +384,8 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
       else:
         paths_output[key] = paths[0][key]
 
-    # reward_to_go = np.flip(np.cumsum(np.flip(rewards, 1), 1), 1) # need to flip since cumsum begins from front
+    # reward_to_go, need to flip since cumsum begins from front
+    # paths_output["rewards"] = np.flip(np.cumsum(np.flip(paths_output["rewards"], 1), 1), 1)
 
     return paths_output
 
@@ -400,18 +430,19 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
             'caption': cap
           })
 
-    # print(cand_list[-1])
-    # print(captions_GT[cand_list[-1]['image_id']])
+    print(cand_list[-1])
+    print(captions_GT[cand_list[-1]['image_id']])
     scorer = ciderEval(captions_GT, cand_list, "coco-val-df")
     scores = scorer.evaluate()
     reshaped_scores = np.reshape(scores, (max_steps, num_samples, self.batch_size))
     rewards = np.mean(np.swapaxes(np.swapaxes(reshaped_scores, 1, 2), 0, 1), axis=2) # Should this be max instead of mean?
     return rewards
 
-  def discriminator_reward(self, sess, data, path, keys):
+  def discriminator_reward(self, sess, data, path):
     image_idxs = path["keys"]
     captions = path["captions"]
-    return self.reward_func(sess, image_idxs, captions, image_idx_from_training=True)
+    print(captions[0])
+    return self.reward_func(sess, image_idxs, captions, image_idx_from_training=True)[1]
 
   def train(self, sess, data):
     paths_output = self.generate_paths(sess, data)
@@ -457,19 +488,24 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
 
     return captions, np.prod(probs, axis=1), img_idxs, q_n
 
-  def load_model(self, sess, modelname, is_PG=False):
-    MaxLikelihoodLSTM.load_model(self, sess, modelname)
+  def load_model(self, sess, modelname, is_PG=False, scope_name=None, lstm_scope_name="MaxLikelihoodLSTM", restore_session=True):
+    super().load_model(sess, modelname, lstm_scope_name, restore_session)
+
+    if scope_name is None:
+      scope_name = self.scope_name
+    else:
+      scope_name = scope_name
 
     if is_PG:
       graph = tf.get_default_graph()
-      self.sampled_ac = graph.get_tensor_by_name("sampled_ac:0")
-      self.logprob = graph.get_tensor_by_name("logprob:0")
-      self.sy_adv = graph.get_tensor_by_name("sy_adv:0")
-      self.loss = graph.get_tensor_by_name("loss:0")
+      self.sampled_ac = graph.get_tensor_by_name("%s/sampled_ac:0" % scope_name)
+      self.logprob = graph.get_tensor_by_name("%s/logprob:0" % scope_name)
+      self.sy_adv = graph.get_tensor_by_name("%s/sy_adv:0" % scope_name)
+      self.loss = graph.get_tensor_by_name("%s/loss:0" % scope_name)
       self.update_op = tf.get_collection("pg_update_op")[0]
 
-      self.baseline_prediction = graph.get_tensor_by_name("baseline_prediction:0")
-      self.baseline_targets = graph.get_tensor_by_name("baseline_targets:0")
+      self.baseline_prediction = graph.get_tensor_by_name("%s/baseline_prediction:0" % scope_name)
+      self.baseline_targets = graph.get_tensor_by_name("%s/baseline_targets:0" % scope_name)
       self.baseline_update_op = tf.get_collection("baseline_update_op")[0]
     else:
-      self.build_model(loaded_mle=True)
+      self.build_model(scope_name=scope_name, loaded_mle=True)
