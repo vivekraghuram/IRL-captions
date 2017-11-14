@@ -8,7 +8,7 @@ GeneratorSpec = namedtuple('GeneratorSpec', ['input_dim', 'hidden_dim', 'output_
                                              'image_feature_dim', 'n_seq_steps', 'embedding_init',
                                              'n_baseline_layers', 'baseline_hidden_dim',
                                              'mle_learning_rate', 'pg_learning_rate',
-                                             'baseline_learning_rate', 'batch_size'])
+                                             'baseline_learning_rate', 'batch_size', 'epsilon'])
 
 class GeneratorWrapper(object):
 
@@ -17,6 +17,10 @@ class GeneratorWrapper(object):
     self.gen_spec = generator_spec
     self.generator = Generator(generator_spec, "training_generator", load_model)
     self.old_generator = Generator(generator_spec, "old_generator", load_model)
+    if load_model:
+      self.load()
+    else:
+      self.setup_ppo()
 
     self._discriminator_reward = discriminator_reward
     self.reward_to_go = reward_to_go
@@ -26,15 +30,42 @@ class GeneratorWrapper(object):
     saver = tf.train.Saver()
     saver.save(sess, '%s/%s'%(modeldir, modelname))
 
-  def train(self, sess, data, num_iterations=300, training_type='PG'):
+  def load(self):
+    graph = tf.get_default_graph()
+    self.update_old_gen = tf.get_collection("update_old_gen")[0]
+    self.ppo_loss = graph.get_tensor_by_name("generator/ppo_loss:0")
+    self.ppo_update_op = tf.get_collection("ppo_update_op")[0]
+
+  def setup_ppo(self):
+    with tf.variable_scope("generator"):
+      generator_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='training_generator')
+      old_generator_vars = tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope='old_generator')
+
+      update_old_gen = []
+      for var, var_target in zip(sorted(generator_vars,     key=lambda v: v.name),
+                                 sorted(old_generator_vars, key=lambda v: v.name)):
+          update_old_gen.append(var_target.assign(var))
+      self.update_old_gen = tf.group(*update_old_gen)
+      tf.add_to_collection("update_old_gen", self.update_old_gen)
+
+      ratio = tf.exp(tf.negative(self.generator.neglogp) - tf.negative(self.old_generator.neglogp))
+      clipped_loss = tf.multiply(tf.clip_by_value(ratio, 1.0 - self.gen_spec.epsilon, 1.0 + self.gen_spec.epsilon), self.generator.ph_adv)
+      reg_loss = tf.multiply(ratio, self.generator.ph_adv)
+      self.ppo_loss = tf.negative(tf.reduce_mean(tf.minimum(reg_loss, clipped_loss)), name="ppo_loss")
+
+      train_vars = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, "training_generator")
+      self.ppo_update_op = tf.train.AdamOptimizer(self.gen_spec.pg_learning_rate).minimize(self.ppo_loss, var_list=train_vars, name="ppo_update_op")
+      tf.add_to_collection("ppo_update_op", self.ppo_update_op)
+
+  def train(self, sess, data, num_iterations, training_type='PG'):
     assert(training_type in ['PG', 'MLE', 'PPO'])
     data.set_mode(training_type).set_batch_size(self.gen_spec.batch_size)
     if training_type == 'PG':
-      return self._train_pg(sess, data)
+      return self._train_pg(sess, data, num_iterations)
     elif training_type == 'MLE':
       return self._train_mle(sess, data, num_iterations)
     elif training_type == 'PPO':
-     raise NotImplementedError
+      return self._train_pg(sess, data, num_iterations, PPO=True)
 
   def _train_mle(self, sess, data, num_iterations):
     """
@@ -66,7 +97,7 @@ class GeneratorWrapper(object):
 
     return c, a
 
-  def _train_pg(self, sess, data):
+  def _train_pg(self, sess, data, num_iterations, PPO=False):
     paths_output = self.generate_paths(sess, data)
 
     ob_in = paths_output["observation_input"]
@@ -101,28 +132,42 @@ class GeneratorWrapper(object):
       }
       sess.run([self.generator.baseline_update_op], feed_dict=baseline_update_dict)
 
-    losses = []
-    for i in range(adv_n.shape[1]):
-      pg_update_dict = {
-        self.generator.ph_adv: adv_n[:, i:i+1],
-        self.generator.ph_target: actions[:, i:i+1],
-        self.generator.ph_image_feat_input: ob_img_feat[:, i, :],
-        self.generator.ph_input: ob_in[:, i:i+1],
-        self.generator.ph_hidden_state: ob_hid_state[:, i, :],
-        self.generator.ph_cell_state: ob_cell_state[:, i, :],
-        self.generator.ph_initial_step: i == 0
-      }
-      loss_val, _, = sess.run([self.generator.loss, self.generator.pg_update_op], feed_dict=pg_update_dict)
-      losses.append(loss_val)
+    if PPO:
+      sess.run(self.update_old_gen)
+
+    for itr in range(num_iterations):
+      for i in range(adv_n.shape[1]):
+        pg_update_dict = {
+          self.generator.ph_adv: adv_n[:, i:i+1],
+          self.generator.ph_target: actions[:, i:i+1],
+          self.generator.ph_image_feat_input: ob_img_feat[:, i, :],
+          self.generator.ph_input: ob_in[:, i:i+1],
+          self.generator.ph_hidden_state: ob_hid_state[:, i, :],
+          self.generator.ph_cell_state: ob_cell_state[:, i, :],
+          self.generator.ph_initial_step: i == 0
+        }
+
+        if PPO:
+          old_gen_dict = {
+            self.old_generator.ph_target: actions[:, i:i+1],
+            self.old_generator.ph_image_feat_input: ob_img_feat[:, i, :],
+            self.old_generator.ph_input: ob_in[:, i:i+1],
+            self.old_generator.ph_hidden_state: ob_hid_state[:, i, :],
+            self.old_generator.ph_cell_state: ob_cell_state[:, i, :],
+            self.old_generator.ph_initial_step: i == 0
+          }
+          sess.run(self.ppo_update_op, feed_dict={**pg_update_dict, **old_gen_dict})
+        else:
+          sess.run(self.generator.pg_update_op, feed_dict=pg_update_dict)
 
 
     return captions, np.prod(probabilities, axis=1), img_idxs, q_n
 
-  def generate_paths(self, sess, data, num_iterations=0, gamma=1.0):
+  def generate_paths(self, sess, data, num_batches=1, gamma=1.0):
     paths = []
 
     for itr, mini_batch in enumerate(data.training_batches):
-      if itr > num_iterations:
+      if itr >= num_batches:
         break;
 
       actions = np.zeros((self.gen_spec.batch_size, self.gen_spec.n_seq_steps), dtype=int)

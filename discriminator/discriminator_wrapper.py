@@ -18,7 +18,7 @@ class DiscriminatorWrapper(object):
         if saved_model_name is not None:
             saver = tf.train.import_meta_graph(
                 '{}/{}.meta'.format(model_base_dir, saved_model_name))
-            saver.restore(load_session, tf.train.latest_checkpoint(model_base_dir))
+            saver.restore(load_session, '{}/{}'.format(model_base_dir, saved_model_name))
             graph = load_session.graph
             caption_input = CaptionInput(word_embedding_init=None, null_id=vocab_data.NULL_ID, graph=graph)
             image_input = ImageInput(image_feature_dim=train_data.image_feature_dim, graph=graph)
@@ -105,7 +105,7 @@ class DiscriminatorWrapper(object):
         # zero label indicating sampled
         new_dat = (img_idxs, caption_word_idx, np.zeros(given_size))
         new_batcher = MiniBatcher(new_dat)
-        mixed_sampled_batcher = MixedMiniBatcher([new_batcher, self.sampled_batcher], [0.5, 0.5])
+        mixed_sampled_batcher = MixedMiniBatcher([new_batcher, self.sampled_batcher], [0.25, 0.75])
         batch_size = given_size
 
         return self.train(sess, self.demo_batcher, mixed_sampled_batcher, iter_num, batch_size)

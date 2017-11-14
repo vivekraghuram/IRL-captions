@@ -78,12 +78,12 @@ class Generator(object):
       multinomial_logits = tf.reshape(self.logits, (tf.shape(self.logits)[0], self.gen_spec.output_dim))
       self.sampled_ac = tf.reshape(tf.multinomial(multinomial_logits, 1, seed=self.seed),
                                    (tf.shape(self.logits)[0], 1), name="sampled_ac")
-      self.logprob = tf.identity(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.ph_target,
-                                                                                logits=self.logits), name="logprob")
+      self.neglogp = tf.identity(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.ph_target,
+                                                                                logits=self.logits), name="neglogp")
 
       # Get average cross entropy over caption
       self.ph_adv = tf.placeholder(tf.float32, (self.gen_spec.batch_size, None), "ph_adv")
-      self.loss = tf.reduce_mean(tf.multiply(self.logprob, self.ph_adv), name="loss")
+      self.loss = tf.reduce_mean(tf.multiply(self.neglogp, self.ph_adv), name="loss")
       self.pg_update_op = tf.train.AdamOptimizer(self.gen_spec.pg_learning_rate).minimize(self.loss, name="update_op")
       tf.add_to_collection("pg_update_op", self.pg_update_op)
 
@@ -132,7 +132,7 @@ class Generator(object):
 
     # Load PG loss
     self.sampled_ac = graph.get_tensor_by_name("%s/PG/sampled_ac:0" % scope)
-    self.logprob = graph.get_tensor_by_name("%s/PG/logprob:0" % scope)
+    self.neglogp = graph.get_tensor_by_name("%s/PG/neglogp:0" % scope)
     self.ph_adv = graph.get_tensor_by_name("%s/PG/ph_adv:0" % scope)
     self.loss = graph.get_tensor_by_name("%s/PG/loss:0" % scope)
     self.pg_update_op = tf.get_collection("pg_update_op")[0]

@@ -125,17 +125,20 @@ class GeneratorData(object):
     return self.data['%s_captions' % split].shape[0]
 
   def prep_index_orders(self):
+    starting_mode = self.mode
     for split in self.valid_splits:
-      split_size = self.split_size(split)
-      self.index_orders[split] = np.arange(split_size)
-      np.random.shuffle(self.index_orders[split])
+      for mode in ['PG', 'MLE']:
+        split_size = self.set_mode(mode).split_size(split)
+        self.index_orders[split + self.mode] = np.arange(split_size)
+        np.random.shuffle(self.index_orders[split + self.mode])
+    self.set_mode(starting_mode)
 
   def batches(self, split):
     split_size = self.split_size(split)
     mask_start, mask_end = 0, self.batch_size
 
     while mask_end < split_size:
-      mask = self.index_orders[split][mask_start:mask_end]
+      mask = self.index_orders[split + self.mode][mask_start:mask_end]
       a, b, c, d = self.sample_minibatch(mask, split)
       mask_start, mask_end = mask_end, mask_end + self.batch_size
       yield (a, b, c, d)
