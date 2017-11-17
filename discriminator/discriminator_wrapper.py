@@ -56,13 +56,13 @@ class DiscriminatorWrapper(object):
     def train(self, sess, demo_batcher, sampled_batcher, iter_num, batch_size):
         train_losses = []
         val_losses = []
-        for i in range(iter_num):
 
-            image_idx_batch, caption_batch, demo_or_sampled_batch = self.process_mini_batch(
-                demo_batcher,
-                sampled_batcher,
-                batch_size
-            )
+        batches = self.batches(demo_batcher, sampled_batcher, batch_size)
+        for i, b in enumerate(batches):
+            if i >= iter_num:
+                break
+
+            image_idx_batch, caption_batch, demo_or_sampled_batch = b
 
             loss, m, me = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
@@ -110,10 +110,17 @@ class DiscriminatorWrapper(object):
 
         return self.train(sess, self.demo_batcher, mixed_sampled_batcher, iter_num, batch_size)
 
+    def process_mini_batch(self, batcher1, batcher2, batch_size):
+        return self.merge_image_caption_demo(batcher1.sample(batch_size), batcher2.sample(batch_size))
+
+    def batches(self, batcher1, batcher2, batch_size):
+        for b1, b2 in zip(batcher1.batches(batch_size), batcher2.batches(batch_size)):
+            yield self.merge_image_caption_demo(b1, b2)
+
     @staticmethod
-    def process_mini_batch(batcher1, batcher2, batch_size):
-        image_idx_batch1, caption_batch1, demo_or_sampled_batch1 = batcher1.sample(batch_size)
-        image_idx_batch2, caption_batch2, demo_or_sampled_batch2 = batcher2.sample(batch_size)
+    def merge_image_caption_demo(b1, b2):
+        image_idx_batch1, caption_batch1, demo_or_sampled_batch1 = b1
+        image_idx_batch2, caption_batch2, demo_or_sampled_batch2 = b2
         image_idx_batch = np.concatenate([image_idx_batch1, image_idx_batch2], axis=0)
         caption_batch = np.concatenate([caption_batch1, caption_batch2], axis=0)
         demo_or_sampled_batch = np.concatenate([demo_or_sampled_batch1, demo_or_sampled_batch2], axis=0)
