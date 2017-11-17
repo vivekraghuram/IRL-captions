@@ -54,7 +54,7 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
     return all_image_features, all_image_urls, all_image_original_coco_ids
 
 
-def write_image_data(image_features, image_urls, image_original_ids, file_prefix=""):
+def write_image_data(image_features, image_urls, image_original_ids, layer_name, file_prefix=""):
 
     """
     :param file_prefix: file prefix
@@ -67,7 +67,7 @@ def write_image_data(image_features, image_urls, image_original_ids, file_prefix
 
     print("\nWriting image data to {}_...".format(file_prefix))
 
-    with h5py.File('{}_vgg19_fc2.h5'.format(file_prefix), 'w') as f:
+    with h5py.File('{}_{}.h5'.format(file_prefix, ), 'w') as f:
         f.create_dataset('features', data=image_features)
 
     with open('{}_image_original_ids.txt'.format(file_prefix), 'w') as img_idx_f:
