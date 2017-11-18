@@ -20,6 +20,7 @@ class PreProcessingConstant(object):
     image_directory = '{}/images'.format(data_directory)
 
     data_output_directory = "datasets/self_process"
+    processing_output_directory = "datasets/processing"
 
     null_token = "<NULL>"
     start_token = "<START>"

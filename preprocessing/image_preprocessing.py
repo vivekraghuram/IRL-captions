@@ -25,14 +25,14 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
     def image_file_path(img_meta_data):
         return "{}/{}".format(image_directory, img_meta_data.file_name)
 
-    batch_size = 5
+    batch_size = 10
     all_image_features = []
     all_image_original_coco_ids = []
     all_image_urls = []
     max_size = len(all_images_meta)
 
     for i in range(0, max_size, batch_size):
-        if i % (batch_size * 1000) == 0:
+        if i % 1000 == 0:
             print("Processing batch #", i)
         if i + batch_size > max_size:
             batch = all_images_meta[i:max_size]
@@ -41,8 +41,8 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
         all_image_original_coco_ids.append([m.original_id for m in batch])
         all_image_urls.append([m.coco_url for m in batch])
         file_path_batch = [image_file_path(m) for m in batch]
-        img = keras_load_image(file_path_batch)
-        features = img_featurizer.featurize(img)
+        img_batch = keras_load_image(file_path_batch)
+        features = img_featurizer.featurize(img_batch)
         all_image_features.append(features)
 
     all_image_features = np.concatenate(all_image_features)
@@ -67,14 +67,14 @@ def write_image_data(image_features, image_urls, image_original_ids, layer_name,
 
     print("\nWriting image data to {}_...".format(file_prefix))
 
-    with h5py.File('{}_{}.h5'.format(file_prefix, ), 'w') as f:
+    with h5py.File('{}_{}.h5'.format(file_prefix, layer_name), 'w') as f:
         f.create_dataset('features', data=image_features)
 
     with open('{}_image_original_ids.txt'.format(file_prefix), 'w') as img_idx_f:
         for img_id in image_original_ids:
             img_idx_f.write(str(img_id) + "\n")
 
-    with open('{}_image_urls.txt'.format(file_prefix), 'w') as img_url_f:
+    with open('{}_urls.txt'.format(file_prefix), 'w') as img_url_f:
         for url in image_urls:
             img_url_f.write(url + "\n")
 

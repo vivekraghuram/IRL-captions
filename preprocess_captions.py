@@ -1,7 +1,6 @@
 import matplotlib.pyplot as plt
 
-from preprocessing.caption_feature_extraction import build_caption_corpus, CaptionTokenizer, tokenize_caption, \
-    process_captions_by_split
+from preprocessing.caption_feature_extraction import build_caption_corpus, CaptionTokenizer, tokenize_caption, process_captions_by_split
 from preprocessing.constant import PreProcessingConstant
 
 
@@ -20,6 +19,8 @@ def cut_off_explorations(corpus_to_explore):
 
 
 def preprocess_captions():
+    max_caption_length = 17
+    min_dif = 60
 
     word_mapping_output_file_path = "{}/coco2014_vocab.json".format(PreProcessingConstant.data_output_directory)
     caption_input_file_path_pattern = '{}/captions_{}.json'
@@ -28,16 +29,17 @@ def preprocess_captions():
     train_data_split = PreProcessingConstant.data_splits['train']
     train_annotation_captions_file_path = caption_input_file_path_pattern.format(PreProcessingConstant.annotations_directory, train_data_split)
     corpus = build_caption_corpus(train_annotation_captions_file_path)
-    word_tokenizer = CaptionTokenizer(min_dif=35, tokenizer=tokenize_caption)
+    word_tokenizer = CaptionTokenizer(min_dif=min_dif, tokenizer=tokenize_caption)
     word_tokenizer.fit(corpus)
     word_tokenizer.write_word_mappings(word_mapping_output_file_path)
 
     # process train
-    process_captions_by_split(word_tokenizer, train_annotation_captions_file_path, train_data_split)
+
+    process_captions_by_split(word_tokenizer, train_annotation_captions_file_path, train_data_split, max_caption_length=max_caption_length)
     # process val
     val_split = PreProcessingConstant.data_splits['val']
     val_annotation_captions_file_path = caption_input_file_path_pattern.format(PreProcessingConstant.annotations_directory, val_split)
-    process_captions_by_split(word_tokenizer, val_annotation_captions_file_path, val_split)
+    process_captions_by_split(word_tokenizer, val_annotation_captions_file_path, val_split, max_caption_length=max_caption_length)
 
 
 if __name__ == '__main__':

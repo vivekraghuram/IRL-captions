@@ -1,6 +1,18 @@
 from preprocessing.constant import PreProcessingConstant
 from preprocessing.image_preprocessing import CocoImageMetaData, VGG19Featurizer, preprocess_image, write_image_data
+from preprocessing.image_index_processing import get_coco_image_ids_in_order
 from pycocotools.coco import COCO
+
+import numpy as np
+
+
+class MockFeaturizer(object):
+    def __init__(self, shape):
+        self.shape = shape
+
+    def featurize(self, img):
+
+        return np.random.uniform(0, 1, tuple([len(img)]) + self.shape)
 
 if __name__ == '__main__':
 
@@ -9,18 +21,28 @@ if __name__ == '__main__':
     The data can be obtained following instruction in http://cocodataset.org/#download
     """
 
+    mock_feat = False
     data_split = PreProcessingConstant.data_splits['train']
-    output_directory = '{}/{}'.format(PreProcessingConstant.data_output_directory, data_split)
+
+    output_directory = '{}/{}'.format(PreProcessingConstant.processing_output_directory, data_split)
     ann_file_path = '{}/instances_{}.json'.format(PreProcessingConstant.annotations_directory, data_split)
     image_directory_path = '{}/{}'.format(PreProcessingConstant.image_directory, data_split)
 
     coco = COCO(ann_file_path)
     all_image_ids = coco.getImgIds()
-    all_images = [CocoImageMetaData(img) for img in coco.loadImgs(all_image_ids)]
+    coco_image_ids_in_order = get_coco_image_ids_in_order(data_split)
+    assert len(all_image_ids) == len(coco_image_ids_in_order)
+    assert set(all_image_ids) == set(coco_image_ids_in_order)
 
-    img_featurizer = VGG19Featurizer()
+    all_images = [CocoImageMetaData(img) for img in coco.loadImgs(coco_image_ids_in_order)]
+
+    layer_name = 'block5_conv4'
+    if mock_feat:
+        img_featurizer = MockFeaturizer((2, 2, 100))
+    else:
+        img_featurizer = VGG19Featurizer(layer_name)
     image_feats, image_urls, image_original_ids = preprocess_image(img_featurizer, all_images, image_directory_path)
-    write_image_data(image_feats, image_urls, image_original_ids, file_prefix=output_directory)
+    write_image_data(image_feats, image_urls, image_original_ids, layer_name, file_prefix=output_directory)
 
     # With keras processing here, and upon deleting the session sometimes there's tensorflow exception
     # It's an unresolved bug on tf: https://github.com/tensorflow/cleverhans/issues/17

@@ -22,9 +22,8 @@ class CocoData(object):
             return "{}_{}".format(data_split, key)
 
         self.which_split = data_split
-        self.captions_in_word_idx = data[data_key('captions')]
         self.image_idx = data[data_key('image_idxs')]
-
+        self.captions_in_word_idx = data[data_key('captions')]
         assert self.captions_in_word_idx.shape[0] == self.image_idx.shape[0]
         self.data_size = self.image_idx.shape[0]
         self.max_caption_len = self.captions_in_word_idx[0].shape[0]
@@ -32,7 +31,9 @@ class CocoData(object):
         self.image_features = data[data_key('features')]
         self.image_urls = data[data_key('urls')]
 
-        assert self.image_features.shape[0] == self.image_urls.shape[0]
+        self.unique_image_num = self.image_features.shape[0]
+        unique_url_num = self.image_urls.shape[0]
+        assert self.unique_image_num == unique_url_num, "Total image feature ({}) is different from urls ({})".format(self.unique_image_num, unique_url_num)
 
         self.image_feature_dim = self.image_features.shape[1]
 
