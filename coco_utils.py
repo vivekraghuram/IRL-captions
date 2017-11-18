@@ -35,7 +35,11 @@ class CocoData(object):
         unique_url_num = self.image_urls.shape[0]
         assert self.unique_image_num == unique_url_num, "Total image feature ({}) is different from urls ({})".format(self.unique_image_num, unique_url_num)
 
-        self.image_feature_dim = self.image_features.shape[1]
+        if len(self.image_features.shape) == 4:
+            self.image_part_num = self.image_features.shape[1] * self.image_features.shape[2]
+        else:
+            self.image_part_num = None
+        self.image_feature_dim = self.image_features.shape[-1]
 
         print("\nLoaded {} data.".format(data_split))
         data_names = ["Captions", "Image indices", "Image features", "Image urls"]
@@ -145,6 +149,9 @@ class VocabData(object):
             for j, tk in enumerate(c):
                 caption_ids[i, j] = self.from_word_to_idx(tk)
         return caption_ids
+
+    def get_null_ids(self, shape):
+        return np.ones(shape) * self.NULL_ID
 
 
 def load_coco_data_struct(base_dir='datasets/coco_captioning',
