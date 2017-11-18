@@ -19,6 +19,15 @@ class BaseImageFeaturizer(object):
         pass
 
 
+class MockFeaturizer(BaseImageFeaturizer):
+    def __init__(self, shape):
+        self.shape = shape
+
+    def featurize(self, img):
+
+        return np.random.uniform(0, 1, tuple([len(img)]) + self.shape)
+
+
 class VGG19Featurizer(BaseImageFeaturizer):
 
     def __init__(self, layer_name='fc2'):

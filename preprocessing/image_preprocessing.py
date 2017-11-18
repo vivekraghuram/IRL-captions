@@ -1,7 +1,6 @@
 import h5py
 import numpy as np
 
-from preprocessing.image_feature_extraction import VGG19Featurizer
 from preprocessing.image_feature_extraction import load_image_batch as keras_load_image
 
 
@@ -20,24 +19,22 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
     :param image_directory: image directory containing file name described in the image
     :return:
     """
-    print("\nStart pre-processing images at {}".format(image_directory))
 
     def image_file_path(img_meta_data):
         return "{}/{}".format(image_directory, img_meta_data.file_name)
 
-    batch_size = 10
+    batch_size = 128
     all_image_features = []
     all_image_original_coco_ids = []
     all_image_urls = []
     max_size = len(all_images_meta)
 
     for i in range(0, max_size, batch_size):
-        if i % 1000 == 0:
-            print("Processing batch #", i)
         if i + batch_size > max_size:
             batch = all_images_meta[i:max_size]
         else:
             batch = all_images_meta[i: i + batch_size]
+
         all_image_original_coco_ids.append([m.original_id for m in batch])
         all_image_urls.append([m.coco_url for m in batch])
         file_path_batch = [image_file_path(m) for m in batch]
@@ -50,13 +47,13 @@ def preprocess_image(img_featurizer, all_images_meta, image_directory):
     all_image_urls = list(flatten(all_image_urls))
     all_image_original_coco_ids = list(flatten(all_image_original_coco_ids))
 
-    print("Done processing {} images!".format(all_image_features.shape))
     return all_image_features, all_image_urls, all_image_original_coco_ids
 
 
-def write_image_data(image_features, image_urls, image_original_ids, layer_name, file_prefix=""):
+def write_image_data(batch_id, image_features, image_urls, image_original_ids, layer_name, file_prefix=""):
 
     """
+    :param batch_id: batch id of image processed
     :param file_prefix: file prefix
     :param image_features: image feature in numpy array
     :param image_urls:  list of string urls
@@ -65,19 +62,34 @@ def write_image_data(image_features, image_urls, image_original_ids, layer_name,
     assert image_features.shape[0] == len(image_original_ids)
     assert image_features.shape[0] == len(image_urls)
 
-    print("\nWriting image data to {}_...".format(file_prefix))
+    print("Writing batch image data # {}, of feature size {} to {}_...".format(batch_id, image_features.shape, file_prefix))
 
-    with h5py.File('{}_{}.h5'.format(file_prefix, layer_name), 'w') as f:
-        f.create_dataset('features', data=image_features)
+    with h5py.File('{}_{}_batches.h5'.format(file_prefix, layer_name), 'a') as f:
+        f.create_dataset('features_batch_{}'.format(batch_id), data=image_features)
 
-    with open('{}_image_original_ids.txt'.format(file_prefix), 'w') as img_idx_f:
+    with open('{}_image_original_ids.txt'.format(file_prefix), 'a') as img_idx_f:
         for img_id in image_original_ids:
             img_idx_f.write(str(img_id) + "\n")
 
-    with open('{}_urls.txt'.format(file_prefix), 'w') as img_url_f:
+    with open('{}_urls.txt'.format(file_prefix), 'a') as img_url_f:
         for url in image_urls:
             img_url_f.write(url + "\n")
 
+    return
+
+
+def merge_h5_feature_batch(batch_ids, layer_name, file_prefix=""):
+
+    all_feats = []
+    with h5py.File('{}_{}_batches.h5'.format(file_prefix, layer_name), 'r') as f:
+        for batch_id in batch_ids:
+            batch_feat = np.array(f['features_batch_{}'.format(batch_id)])
+            all_feats.append(batch_feat)
+    all_feats = np.concatenate(all_feats, axis=0)
+
+    print("Merging all img features to file", all_feats.shape)
+    with h5py.File('{}_{}.h5'.format(file_prefix, layer_name), 'a') as f:
+        f.create_dataset('features', data=all_feats)
     print("Done!")
 
-    return
+

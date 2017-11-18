@@ -1,18 +1,8 @@
 from preprocessing.constant import PreProcessingConstant
-from preprocessing.image_preprocessing import CocoImageMetaData, VGG19Featurizer, preprocess_image, write_image_data
+from preprocessing.image_feature_extraction import MockFeaturizer, VGG19Featurizer
+from preprocessing.image_preprocessing import CocoImageMetaData, preprocess_image, write_image_data, merge_h5_feature_batch
 from preprocessing.image_index_processing import get_coco_image_ids_in_order
 from pycocotools.coco import COCO
-
-import numpy as np
-
-
-class MockFeaturizer(object):
-    def __init__(self, shape):
-        self.shape = shape
-
-    def featurize(self, img):
-
-        return np.random.uniform(0, 1, tuple([len(img)]) + self.shape)
 
 if __name__ == '__main__':
 
@@ -41,8 +31,23 @@ if __name__ == '__main__':
         img_featurizer = MockFeaturizer((2, 2, 100))
     else:
         img_featurizer = VGG19Featurizer(layer_name)
-    image_feats, image_urls, image_original_ids = preprocess_image(img_featurizer, all_images, image_directory_path)
-    write_image_data(image_feats, image_urls, image_original_ids, layer_name, file_prefix=output_directory)
+
+    max_size = len(all_images)
+    batch_size = 1000
+
+    batch_ids = range(0, max_size, batch_size)
+
+    for i in batch_ids:
+        print("Processing batch # {}".format(i))
+        if i + batch_size > max_size:
+            batch = all_images[i:max_size]
+        else:
+            batch = all_images[i: i + batch_size]
+
+        image_feats, image_urls, image_original_ids = preprocess_image(img_featurizer, batch, image_directory_path)
+        write_image_data(i, image_feats, image_urls, image_original_ids, layer_name, file_prefix=output_directory)
+
+    merge_h5_feature_batch(batch_ids, layer_name, output_directory)
 
     # With keras processing here, and upon deleting the session sometimes there's tensorflow exception
     # It's an unresolved bug on tf: https://github.com/tensorflow/cleverhans/issues/17
