@@ -88,7 +88,7 @@ def merge_h5_feature_batch(batch_ids, layer_name, file_prefix=""):
     all_feats = np.concatenate(all_feats, axis=0)
 
     print("Merging all img features to file", all_feats.shape)
-    with h5py.File('{}_{}.h5'.format(file_prefix, layer_name), 'a') as f:
+    with h5py.File('{}_{}.h5'.format(file_prefix, layer_name), 'w') as f:
         f.create_dataset('features', data=all_feats)
     print("Done!")
 
