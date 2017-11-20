@@ -151,7 +151,7 @@ class VocabData(object):
         return caption_ids
 
     def get_null_ids(self, shape):
-        return np.ones(shape) * self.NULL_ID
+        return np.ones(shape, dtype=np.int32) * self.NULL_ID
 
 
 def load_coco_data_struct(base_dir='datasets/coco_captioning',
