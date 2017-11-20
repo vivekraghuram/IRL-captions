@@ -47,7 +47,8 @@ if __name__ == '__main__':
         image_feats, image_urls, image_original_ids = preprocess_image(img_featurizer, batch, image_directory_path)
         write_image_data(i, image_feats, image_urls, image_original_ids, layer_name, file_prefix=output_directory)
 
-    merge_h5_feature_batch(batch_ids, layer_name, output_directory)
+    input_file_prefix = "{}_{}".format(output_directory, layer_name)
+    merge_h5_feature_batch(batch_ids, input_file_prefix)
 
     # With keras processing here, and upon deleting the session sometimes there's tensorflow exception
     # It's an unresolved bug on tf: https://github.com/tensorflow/cleverhans/issues/17
