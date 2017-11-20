@@ -78,17 +78,17 @@ def write_image_data(batch_id, image_features, image_urls, image_original_ids, l
     return
 
 
-def merge_h5_feature_batch(batch_ids, layer_name, file_prefix=""):
+def merge_h5_feature_batch(batch_ids, file_prefix):
 
     all_feats = []
-    with h5py.File('{}_{}_batches.h5'.format(file_prefix, layer_name), 'r') as f:
+    with h5py.File('{}_batches.h5'.format(file_prefix), 'r') as f:
         for batch_id in batch_ids:
             batch_feat = np.array(f['features_batch_{}'.format(batch_id)])
             all_feats.append(batch_feat)
     all_feats = np.concatenate(all_feats, axis=0)
 
     print("Merging all img features to file", all_feats.shape)
-    with h5py.File('{}_{}.h5'.format(file_prefix, layer_name), 'w') as f:
+    with h5py.File('{}.h5'.format(file_prefix), 'w') as f:
         f.create_dataset('features', data=all_feats)
     print("Done!")
 
