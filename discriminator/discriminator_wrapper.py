@@ -3,10 +3,11 @@ import numpy as np
 import tensorflow as tf
 
 import layer_utils
-from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, Discriminator, AttentiveLstm
+from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, \
+    Discriminator, AttentiveLstm
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
 from discriminator.mini_batcher import MiniBatcher, MixedMiniBatcher
-from image_utils import image_from_url
+from image_utils import image_from_url, visualize_attention
 
 
 class DiscriminatorWrapper(object):
@@ -32,7 +33,7 @@ class DiscriminatorWrapper(object):
             image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:], graph=graph)
             metadata_input = MetadataInput(graph=graph)
             reward_config = LstmScalarRewardStrategy.RewardConfig(
-                reward_scalar_transformer=lambda x: tf.nn.sigmoid(
+                reward_scalar_transformer=lambda x: tf.nn.tanh(
                     layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
             )
             attention_model = self.get_attention_model()
@@ -45,7 +46,7 @@ class DiscriminatorWrapper(object):
             image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:])
             metadata_input = MetadataInput()
             reward_config = LstmScalarRewardStrategy.RewardConfig(
-                reward_scalar_transformer=lambda x: tf.nn.sigmoid(
+                reward_scalar_transformer=lambda x: tf.nn.tanh(
                     layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
             )
 
@@ -68,13 +69,13 @@ class DiscriminatorWrapper(object):
             attention_model = None
         return attention_model
 
-    def pre_train(self, sess, iter_num=400, batch_size=1000):
+    def pre_train(self, sess, iter_num=400, batch_size=1000, validate=True):
 
         return self.train(sess,
                           self.demo_batcher,
-                          self.sampled_batcher, iter_num, batch_size)
+                          self.sampled_batcher, iter_num, batch_size, validate)
 
-    def train(self, sess, demo_batcher, sampled_batcher, iter_num, batch_size):
+    def train(self, sess, demo_batcher, sampled_batcher, iter_num, batch_size, validate=True):
         train_losses = []
         val_losses = []
 
@@ -88,14 +89,15 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 20 == 0:
+            if i % 5 == 0:
                 print("iter {}, loss: {}".format(i, output.loss))
 
-            if i % 5 == 0:
-                val_loss = self.examine_validation(sess, batch_size, to_examine=False)
-                val_losses.append(val_loss)
-            else:
-                val_losses.append(val_losses[-1])
+            if validate:
+                if i % 5 == 0:
+                    val_loss = self.examine_validation(sess, batch_size, to_examine=False)
+                    val_losses.append(val_loss)
+                else:
+                    val_losses.append(val_losses[-1])
 
         return train_losses, val_losses
 
@@ -147,7 +149,9 @@ class DiscriminatorWrapper(object):
         demo_or_sampled_batch = np.concatenate([demo_or_sampled_batch1, demo_or_sampled_batch2], axis=0)
         return image_idx_batch, caption_batch, demo_or_sampled_batch
 
-    def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=False,
+    def assign_reward(self, sess, img_idxs, caption_sentences,
+                      image_idx_from_training=True,
+                      to_examine=False,
                       max_step=16):
 
         captions = [c.split() for c in caption_sentences]
@@ -161,14 +165,16 @@ class DiscriminatorWrapper(object):
 
         if self.has_attention_model():
             # max len - 1, without start token during train
-            assert caption_test.shape[0] > (coco_data.max_caption_len - 1), "Attention requires max caption length of {}".format(coco_data.max_caption_len - 1)
+            assert caption_test.shape[1] < (
+                coco_data.max_caption_len - 1), "Attention requires max caption length of {}".format(
+                coco_data.max_caption_len - 1)
             additional = coco_data.max_caption_len - caption_test.shape[1] - 1
             nulls = self.vocab_data.get_null_ids((caption_test.shape[0], additional))
             caption_test = np.concatenate((caption_test, nulls), axis=1)
 
         output = self.run_test(sess, image_feats_test, caption_test)
         if to_examine:
-            self.examine(coco_data, img_idxs, caption_test, output.masked_reward, output.mean_reward_per_sentence)
+            self.examine(coco_data, img_idxs, caption_test, output)
 
         if max_step < caption_test.shape[0]:
             rewards = output.masked_reward[:, :max_step]
@@ -190,14 +196,41 @@ class DiscriminatorWrapper(object):
         self.discr.metadata_input.pre_feed(labels=np.ones(img_feature_test.shape[0]))
         return self.discr.test(sess)
 
-    def examine(self, coco_data, chosen_img, chosen_caption, chosen_reward_per_token, chosen_mean_reward):
-        for (img_idx, cap, r, me_r) in zip(chosen_img, chosen_caption, chosen_reward_per_token, chosen_mean_reward):
-            print("Avg reward: ", me_r)
+    def _base_examine(self, chosen_img, chosen_caption, output, examine_func):
+        irange = range(len(chosen_img))
+        chosen_reward_per_token = output.masked_reward
+        chosen_mean_reward = output.mean_reward_per_sentence
+
+        for zipped in zip(irange, chosen_img, chosen_caption, chosen_reward_per_token, chosen_mean_reward):
+            examine_func(*zipped)
+
+    def examine(self, coco_data, chosen_img, chosen_caption, output):
+
+        def examine_visual_attention(i, img_idx, cap, reward, mean_reward):
+            decoded = self.vocab_data.decode_captions(cap).split()
+
+            labels = []
+            for (c, r) in zip(decoded, reward):
+                reward_formatted = '%s' % float('%.2g' % r)
+                label = "{}: {}".format(c, reward_formatted)
+                labels.append(label)
+            print("Avg reward: ", mean_reward)
+            visualize_attention(coco_data.image_paths[img_idx], output.attention[i], labels)
+            print("- - - -")
+
+        def examine_reward_by_word(_, img_idx, cap, reward, mean_reward):
+            print("Avg reward: ", mean_reward)
             self.show_image_by_image_idxs(coco_data, [img_idx])
             decoded = self.vocab_data.decode_captions(cap).split()
-            for (i, j) in zip(decoded, r):
+            for (i, j) in zip(decoded, reward):
                 print("{:<15} {}".format(i, j))
             print("- - - -")
+
+        if self.has_attention_model():
+            return self._base_examine(chosen_img, chosen_caption, output, examine_visual_attention)
+        else:
+            return self._base_examine(chosen_img, chosen_caption, output, examine_reward_by_word)
+
 
     def show_image_by_image_idxs(self, coco_data, img_idxs):
         """
@@ -209,26 +242,6 @@ class DiscriminatorWrapper(object):
             plt.axis('off')
             plt.show()
 
-    def examine_batch_results(self, demo_or_sampled_batch, image_id, caption_batch, reward_per_token,
-                              mean_reward):
-        num_to_examine = 4
-
-        def examine_sample(chosen):
-            print(chosen)
-            chosen_img = image_id[chosen]
-            chosen_cap = caption_batch[chosen]
-            chosen_reward_per_token = reward_per_token[chosen]
-            chosen_mean_reward = mean_reward[chosen]
-
-            self.examine(chosen_img, chosen_cap, chosen_reward_per_token, chosen_mean_reward)
-
-        print("DEMO RESULTS")
-        chosen = np.random.choice(np.where(demo_or_sampled_batch == 1)[0], num_to_examine)
-        examine_sample(chosen)
-        print("\n\nSAMPLED RESULTS")
-        chosen = np.random.choice(np.where(demo_or_sampled_batch == 0)[0], num_to_examine)
-        examine_sample(chosen)
-
     def examine_validation(self, sess, batch_size=100, to_examine=True):
         image_idx_batch, caption_batch, demo_or_sampled_batch = self.process_mini_batch(self.val_demo_batcher,
                                                                                         self.val_sample_batcher,
@@ -236,8 +249,7 @@ class DiscriminatorWrapper(object):
         caption_batch = caption_batch[:, 1:]
         output = self.run_validation(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
         if to_examine:
-            self.examine(self.val_data, image_idx_batch, caption_batch, output.masked_reward,
-                         output.mean_reward_per_sentence)
+            self.examine(self.val_data, image_idx_batch, caption_batch, output)
         return output.loss
 
     def save_model(self, sess, model_name):

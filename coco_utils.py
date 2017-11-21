@@ -31,6 +31,8 @@ class CocoData(object):
         self.image_features = data[data_key('features')]
         self.image_urls = data[data_key('urls')]
 
+        self.image_paths = data[data_key('image_paths')]
+
         self.unique_image_num = self.image_features.shape[0]
         unique_url_num = self.image_urls.shape[0]
         assert self.unique_image_num == unique_url_num, "Total image feature ({}) is different from urls ({})".format(self.unique_image_num, unique_url_num)
@@ -80,6 +82,7 @@ class CocoData(object):
             d['{}_urls'.format(self.which_split)] = self.image_urls
             d['{}_captions'.format(self.which_split)] = c
             d['{}_image_idxs'.format(self.which_split)] = i
+            d['{}_image_paths'.format(self.which_split)] = self.image_paths
             return d
 
         return CocoData(build_data_dict(c1, i1), self.which_split), CocoData(build_data_dict(c2, i2), self.which_split)
@@ -157,24 +160,48 @@ class VocabData(object):
 def load_coco_data_struct(base_dir='datasets/coco_captioning',
                           max_train=None,
                           source_image_features='vgg16_fc7',
-                          is_caption_separated=False):
+                          is_caption_separated=False,
+                          mock_val=False):
+
     data = load_coco_data(base_dir=base_dir, max_train=max_train,
                           pca_features=False,
                           source_image_features=source_image_features,
-                          is_caption_separated=is_caption_separated)
+                          is_caption_separated=is_caption_separated,
+                          image_path_processor=lambda x: "data/" + x[5:])
 
     vocab_data = VocabData(data)
     train_data = CocoData(data, "train")
-    val_data = CocoData(data, "val")
+
+    if mock_val:
+        val_data = mock_data(real_data=train_data, image_num=1000, data_split="val")
+    else:
+        val_data = CocoData(data, "val")
 
     return vocab_data, train_data, val_data
+
+
+def mock_data(real_data, image_num, data_split):
+
+    def data_key(key):
+        return "{}_{}".format(data_split, key)
+
+    data = {}
+    img_idx = range(image_num)
+    data[data_key('image_idxs')] = np.array(img_idx)
+    data[data_key('features')] = real_data.image_features[:image_num]
+    data[data_key('captions')] = real_data.captions_in_word_idx[:image_num]
+    data[data_key('urls')] = real_data.image_urls[:image_num]
+    data[data_key('image_paths')] = real_data.image_paths[:image_num]
+
+    return CocoData(data, data_split)
 
 
 def load_coco_data(base_dir='datasets/coco_captioning',
                    max_train=None,
                    pca_features=True,
                    source_image_features='vgg16_fc7',
-                   is_caption_separated=False):
+                   is_caption_separated=False,
+                   image_path_processor=None):
 
     data = {}
     if is_caption_separated is False:
@@ -230,6 +257,9 @@ def load_coco_data(base_dir='datasets/coco_captioning',
         val_urls = np.asarray([line.strip() for line in f])
     data['val_urls'] = val_urls
 
+    extract_image_file_path(data, base_dir, "train", image_path_processor)
+    extract_image_file_path(data, base_dir, "val", image_path_processor)
+
     # Maybe subsample the training data
     if max_train is not None:
         num_train = data['train_captions'].shape[0]
@@ -238,6 +268,14 @@ def load_coco_data(base_dir='datasets/coco_captioning',
         data['train_image_idxs'] = data['train_image_idxs'][mask]
 
     return data
+
+
+def extract_image_file_path(data, base_dir, split, image_path_processor=None):
+    image_file_path = os.path.join(base_dir, '{}2014_images.txt'.format(split))
+    with open(image_file_path, 'r') as f:
+        m_func = image_path_processor if image_path_processor else lambda x: x
+        file_paths = np.asarray([m_func(line.strip()) for line in f])
+    data['{}_image_paths'.format(split)] = file_paths
 
 
 def load_word_embedding(embedding_file):
