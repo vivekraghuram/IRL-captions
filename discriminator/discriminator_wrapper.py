@@ -3,8 +3,7 @@ import numpy as np
 import tensorflow as tf
 
 import layer_utils
-from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, \
-    Discriminator, AttentiveLstm
+from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, DiscriminatorMaxReward, AttentiveLstm
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
 from discriminator.mini_batcher import MiniBatcher, MixedMiniBatcher
 from image_utils import image_from_url, visualize_attention
@@ -37,10 +36,10 @@ class DiscriminatorWrapper(object):
                     layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
             )
             attention_model = self.get_attention_model()
-            self.discr = Discriminator(caption_input, image_input, metadata_input,
-                                       attention_model=attention_model,
-                                       reward_config=reward_config,
-                                       hidden_dim=hidden_dim, graph=graph)
+            self.discr = DiscriminatorMaxReward(caption_input, image_input, metadata_input,
+                                                attention_model=attention_model,
+                                                reward_config=reward_config,
+                                                hidden_dim=hidden_dim, graph=graph)
         else:
             caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID)
             image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:])
@@ -51,10 +50,10 @@ class DiscriminatorWrapper(object):
             )
 
             attention_model = self.get_attention_model()
-            self.discr = Discriminator(caption_input, image_input, metadata_input,
-                                       attention_model=attention_model,
-                                       reward_config=reward_config,
-                                       hidden_dim=hidden_dim)
+            self.discr = DiscriminatorMaxReward(caption_input, image_input, metadata_input,
+                                                attention_model=attention_model,
+                                                reward_config=reward_config,
+                                                hidden_dim=hidden_dim)
 
     def has_attention_model(self):
         return self.train_data.image_part_num is not None
@@ -89,7 +88,7 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 5 == 0:
+            if i % 100 == 0:
                 print("iter {}, loss: {}".format(i, output.loss))
 
             if validate:
@@ -230,7 +229,6 @@ class DiscriminatorWrapper(object):
             return self._base_examine(chosen_img, chosen_caption, output, examine_visual_attention)
         else:
             return self._base_examine(chosen_img, chosen_caption, output, examine_reward_by_word)
-
 
     def show_image_by_image_idxs(self, coco_data, img_idxs):
         """
