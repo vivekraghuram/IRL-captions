@@ -65,7 +65,7 @@ class TextualAttention(object):
 
     def build(self, caption_input, not_null_count, image_input, scope):
 
-        def get_mean_caption(caption_input):
+        def get_mean_caption():
             return tf.reduce_sum(caption_input, axis=1) / tf.expand_dims(not_null_count, axis=1)
 
         conv_output_size = 1024
@@ -76,7 +76,7 @@ class TextualAttention(object):
 
         with tf.variable_scope(scope):
 
-            mean_caption = get_mean_caption(caption_input)
+            mean_caption = get_mean_caption()
             init_hidden_state = layer_utils.affine_transform(mean_caption, self.hidden_dim, "init_h")
             init_cell_state = layer_utils.affine_transform(mean_caption, self.hidden_dim, "init_c")
             state = tf.nn.rnn_cell.LSTMStateTuple(init_cell_state, init_hidden_state)

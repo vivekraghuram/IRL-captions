@@ -245,6 +245,7 @@ class BaseDiscriminator(object):
         self.metadata_input = metadata_input
         self.reward_config = reward_config
         self.hidden_dim = hidden_dim
+        self.global_step = tf.Variable(0, name = 'global_step', trainable = False)
 
         max_reward_opt_tname = "adam_max_reward"
         rewards_loss_collection_tname = "rewards_and_loss"
@@ -264,7 +265,11 @@ class BaseDiscriminator(object):
             [tf.add_to_collection(rewards_loss_collection_tname, t) for t in rewards_and_loss]
 
             self.alphas = self.attention_model.get_alphas() if attention_model else tf.constant(0)
-            self.update_op = tf.train.AdamOptimizer(learning_rate, name=max_reward_opt_tname).minimize(self.loss)
+
+            tvars = tf.trainable_variables()
+            gs, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tvars), 3.0)
+            solver = tf.train.AdamOptimizer(learning_rate)
+            self.update_op = solver.apply_gradients(zip(gs, tvars), global_step=self.global_step,  name=max_reward_opt_tname)
 
     def _compute_reward_and_loss(self, reward_config):
         """
@@ -319,6 +324,13 @@ class DiscriminatorMaxReward(BaseDiscriminator):
                                        scope='attention')
             return self.attention_model
 
+    def _secondary_loss(self):
+
+        if self.attention_model:
+            return 0.05 * tf.reduce_mean(tf.square(1 - tf.reduce_sum(self.attention_model.get_alphas(), axis=1)))
+        else:
+            0
+
     def _compute_loss(self, rewards):
         expanded_signs = self.metadata_input.get_signs()
         unsigned_masked_reward = rewards * self.caption_input.get_not_null_numeric_mask()
@@ -328,4 +340,6 @@ class DiscriminatorMaxReward(BaseDiscriminator):
                                                              axis=1) / self.caption_input.get_not_null_count()
         mean_reward = tf.reduce_mean(signed_mean_reward_for_each_sentence)
         loss = mean_reward * - 1
+        loss = loss + self._secondary_loss()
+
         return loss, unsigned_masked_reward, unsigned_mean_reward

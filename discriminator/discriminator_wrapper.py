@@ -1,3 +1,4 @@
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
@@ -9,6 +10,17 @@ from discriminator.discriminator_attend_text import DiscriminatorClassification,
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
 from discriminator.mini_batcher import MiniBatcher, MixedMiniBatcher
 from image_utils import image_from_url, visualize_attention
+
+
+def plot_losses(train_loss, val_loss, title=""):
+    plt.plot(np.arange(0, len(train_loss)), train_loss, 'g', val_loss, 'r')
+    train_loss_patch = mpatches.Patch(color='g', label='train')
+    val_loss_patch = mpatches.Patch(color='r', label='val')
+    plt.legend(handles=[train_loss_patch, val_loss_patch])
+    plt.ylabel('Loss')
+    plt.xlabel('Iter')
+    plt.title(title)
+    plt.show()
 
 
 class DiscriminatorWrapper(object):
@@ -118,7 +130,7 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 5 == 0:
+            if i % 50 == 0:
                 print("iter {}, loss: {}".format(i, output.loss))
 
             if validate:
