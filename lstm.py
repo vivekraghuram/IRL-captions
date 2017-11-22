@@ -367,9 +367,12 @@ class PolicyGradientLSTM(MaxLikelihoodLSTM):
       }
 
       if self.reward_func:
-        path["rewards"] = self.discriminator_reward(sess, data, path)
+        reward_func_out = self.discriminator_reward(sess, data, path)
       else:
-        path["rewards"] = self.generate_cidre_rewards(sess, data, path, img_keys, captions_GT)
+        reward_func_out = self.generate_cidre_rewards(sess, data, path, img_keys, captions_GT)
+
+      rewards[0:reward_func_out.shape[0], 0:reward_func_out.shape[1]] = reward_func_out
+      path["rewards"] = rewards
 
       paths.append(path)
       if (count + 1) * self.batch_size >= num_paths:
