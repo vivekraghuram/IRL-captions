@@ -153,15 +153,17 @@ class LstmScalarRewardStrategy(object):
             self.take_difference = take_difference
 
 
-class AttentiveLstm(object):
+class VisualAttention(object):
     def __init__(self,
                  max_sentence_length,
                  image_part_num,
                  image_feature_dim,
+                 hidden_dim,
                  attention_dim):
 
         self.max_sentence_length = max_sentence_length
         self.attention_dim = attention_dim
+        self.hidden_dim = hidden_dim
         self.image_part_num = image_part_num
         self.image_feature_dim = image_feature_dim
         self.output = None
@@ -169,14 +171,14 @@ class AttentiveLstm(object):
 
         self.attention_cname = "attention_results"
 
-    def build(self, caption_embedding, image_input, hidden_dim, scope):
+    def build(self, caption_embedding, image_input, scope):
 
         image_annotations = tf.reshape(image_input, [-1, self.image_part_num, self.image_feature_dim])
 
         with tf.variable_scope(scope):
-            init_hidden_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), hidden_dim,
+            init_hidden_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), self.hidden_dim,
                                                              "init_h")
-            init_cell_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), hidden_dim,
+            init_cell_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), self.hidden_dim,
                                                            "init_c")
             state = tf.nn.rnn_cell.LSTMStateTuple(init_cell_state, init_hidden_state)
             output = init_hidden_state
@@ -194,7 +196,7 @@ class AttentiveLstm(object):
 
                     weighted_ctx = tf.reduce_mean(annotation * tf.expand_dims(alpha, 2), axis=1)
 
-                    lstm = tf.nn.rnn_cell.LSTMCell(hidden_dim, initializer=tf.random_normal_initializer(stddev=0.03))
+                    lstm = tf.nn.rnn_cell.LSTMCell(self.hidden_dim, initializer=tf.random_normal_initializer(stddev=0.03))
 
                     word_embedding = caption_embedding[:, idx]
                     output, state = lstm(tf.concat([word_embedding, weighted_ctx], axis=1), state)
@@ -265,6 +267,14 @@ class BaseDiscriminator(object):
             self.update_op = tf.train.AdamOptimizer(learning_rate, name=max_reward_opt_tname).minimize(self.loss)
 
     def _compute_reward_and_loss(self, reward_config):
+        """
+        tuple of loss, rewards per token, mean rewards for sentence
+        :param reward_config:
+        :return:
+        loss: scalar loss value for the batch, None
+        rewards: reward per token, [None, max_sentence_len]
+        mean_reward: mean reward per sentence, [None]
+        """
         pass
 
     def _get_feed_dict(self):
@@ -292,6 +302,7 @@ class BaseDiscriminator(object):
 
 
 class DiscriminatorMaxReward(BaseDiscriminator):
+
     def _compute_reward_and_loss(self, reward_config):
         lstm = self._combine_input_to_lstm()
         rewards = LstmScalarRewardStrategy(lstm.get_output(), reward_config).get_rewards()
@@ -299,14 +310,12 @@ class DiscriminatorMaxReward(BaseDiscriminator):
 
     def _combine_input_to_lstm(self):
         if self.attention_model is None:
-            image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim,
-                                                            'image_proj')
+            image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim, 'image_proj')
             initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(image_projection * 0, image_projection)
             return Lstm(self.hidden_dim, initial_lstm_state, self.caption_input.get_embedding())
         else:
             self.attention_model.build(self.caption_input.get_embedding(),
                                        self.image_input.get_image_features(),
-                                       self.hidden_dim,
                                        scope='attention')
             return self.attention_model
 
