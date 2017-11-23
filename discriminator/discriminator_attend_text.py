@@ -1,23 +1,81 @@
 import tensorflow as tf
-import layer_utils
 import tensorflow.contrib.layers as layers
+import layer_utils
 import math
 
 from discriminator.discriminator import BaseDiscriminator
 
 
+class VanillaDotProduct(object):
+    def __init__(self, hidden_dim):
+        self.hidden_dim = hidden_dim
+
+        self.lstm_outputs = None
+        self.image_proj = None
+
+        self.output = None
+        self.logits = None
+        self.rewards = None
+
+    def build(self, caption_input, not_null_count, image_input, scope):
+        # input here can consider excluding start/end tokens
+
+        init_state = layer_utils.affine_transform(tf.reduce_max(caption_input, axis=1), self.hidden_dim, scope="init")
+
+        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state)
+
+        with tf.variable_scope(scope):
+            cell = tf.nn.rnn_cell.LSTMCell(self.hidden_dim)
+            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input, time_major=False, dtype=tf.float32,
+                                               initial_state=initial_lstm_state)
+
+        self.lstm_outputs = lstm_output
+
+        # image
+        with tf.variable_scope("img_proj"):
+            self.image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
+
+        final_lstm_output = self.lstm_outputs[:, -1, :]
+        single_dim_logit = tf.reduce_sum(final_lstm_output*self.image_proj, axis=1)
+        single_dim_logit = tf.reshape(single_dim_logit, [-1, 1])
+
+        self.logits = tf.concat([-1 * single_dim_logit, single_dim_logit], axis=1)  # pos 1 is demo
+        self.rewards = tf.squeeze(layer_utils.affine_transform(self.lstm_outputs, 1, 'hidden_to_reward'), axis=2)
+
+    def get_logits(self):
+        return self.logits
+
+    def get_rewards(self):
+        return self.rewards
+
+
 class DiscriminatorClassification(BaseDiscriminator):
 
     def _compute_reward_and_loss(self, reward_config):
+        print("Building classification")
         cls = self.build_classification_model()
-        return self._compute_loss(cls.get_logits(), cls.get_rewards())
+        self._logits = cls.get_logits()
+        return self._compute_loss(self._logits, cls.get_rewards())
 
     def build_classification_model(self):
-        self.attention_model.build(self.caption_input.get_embedding(),
-                                   self.caption_input.get_not_null_count(),
-                                   self.image_input.get_image_features(),
-                                   scope='attention')
-        return self.attention_model
+
+        if self.is_attention:
+            scope = "cls_attention"
+        else:
+            scope = "cls"
+        self.learner_model.build(self.caption_input.get_embedding(),
+                                 self.caption_input.get_not_null_count(),
+                                 self.image_input.get_image_features(),
+                                 scope=scope)
+        return self.learner_model
+
+    def _secondary_loss(self):
+        if self.is_attention:
+            masked_alpha = self.learner_model.get_alphas() * self.caption_input.get_not_null_numeric_mask()
+            loss = tf.reduce_mean(tf.square(1 - tf.reduce_sum(masked_alpha, axis=1)))
+            return 0.05 * loss
+        else:
+            return 0
 
     def _compute_loss(self, logits, rewards):
 
@@ -27,13 +85,15 @@ class DiscriminatorClassification(BaseDiscriminator):
         loss = tf.nn.softmax_cross_entropy_with_logits(labels=labels, logits=logits)
 
         batch_loss = tf.reduce_mean(loss)
+        total_loss = batch_loss + self._secondary_loss()
 
         masked_reward = rewards * self.caption_input.get_not_null_numeric_mask()
         mean_reward_for_each_sentence = tf.reduce_sum(masked_reward, axis=1) / self.caption_input.get_not_null_count()
-        return batch_loss, self.pred(logits, rewards), mean_reward_for_each_sentence
+        return total_loss, rewards, mean_reward_for_each_sentence
 
-    def pred(self, logits, rewards):
-        return tf.expand_dims(tf.argmax(logits, axis=1), 1) * tf.ones(tf.shape(rewards), dtype=tf.int64)
+    def _pred(self):
+        argmax = tf.argmax(self._logits, axis=1)
+        return argmax
 
 
 class TextualAttention(object):
@@ -56,7 +116,6 @@ class TextualAttention(object):
         self.image_feature_dim = image_feature_dim
         self.pooling_stride = 2
 
-        self.output = None
         self.alphas = None
         self.logits = None
         self.rewards = None
@@ -75,7 +134,6 @@ class TextualAttention(object):
         image_parts = tf.reshape(image_pooled, [-1, total_regions, conv_output_size])
 
         with tf.variable_scope(scope):
-
             mean_caption = get_mean_caption()
             init_hidden_state = layer_utils.affine_transform(mean_caption, self.hidden_dim, "init_h")
             init_cell_state = layer_utils.affine_transform(mean_caption, self.hidden_dim, "init_c")
@@ -100,7 +158,8 @@ class TextualAttention(object):
 
                     weighted_ctx = tf.reduce_mean(word_projection * tf.expand_dims(alpha, 2), axis=1)
 
-                    lstm = tf.nn.rnn_cell.LSTMCell(self.hidden_dim, initializer=tf.random_normal_initializer(stddev=0.03))
+                    lstm = tf.nn.rnn_cell.LSTMCell(self.hidden_dim,
+                                                   initializer=tf.random_normal_initializer(stddev=0.03))
 
                     image_part = image_parts[:, idx]
                     lstm_input = tf.concat([image_part, weighted_ctx], axis=1)
@@ -110,17 +169,14 @@ class TextualAttention(object):
                     alpha_seq.append(alpha)
                     lstm_scope.reuse_variables()
 
-                self.output = tf.stack(output_seq, axis=1)
+                output = tf.stack(output_seq, axis=1)
                 all_alphas = tf.stack(alpha_seq, axis=1)
 
         self.alphas = tf.reduce_max(all_alphas, axis=1)
 
         tf.add_to_collection(self.attention_cname, self.alphas)
-        self.logits = self.enriched_image_to_prediction(self.output, pooled_part_num, "2d_pooling")
+        self.logits = self.enriched_image_to_prediction(output, pooled_part_num, "2d_pooling")
         self.rewards = self.get_rewards_over_words()
-
-    def get_output(self):
-        return self.output
 
     def get_alphas(self, graph=None):
         if graph:
