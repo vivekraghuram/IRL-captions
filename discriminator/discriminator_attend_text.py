@@ -21,12 +21,13 @@ class VanillaDotProduct(object):
         # input here can consider excluding start/end tokens
 
         init_state = layer_utils.affine_transform(tf.reduce_max(caption_input, axis=1), self.hidden_dim, scope="init")
-
-        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state)
+        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state * 0)
 
         with tf.variable_scope(scope):
             cell = tf.nn.rnn_cell.LSTMCell(self.hidden_dim)
-            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input, time_major=False, dtype=tf.float32,
+            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input,
+                                               sequence_length=not_null_count, time_major=False,
+                                               dtype=tf.float32,
                                                initial_state=initial_lstm_state)
 
         self.lstm_outputs = lstm_output
@@ -35,12 +36,18 @@ class VanillaDotProduct(object):
         with tf.variable_scope("img_proj"):
             self.image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
 
-        final_lstm_output = self.lstm_outputs[:, -1, :]
-        single_dim_logit = tf.reduce_sum(final_lstm_output*self.image_proj, axis=1)
+        sentence_length = tf.shape(caption_input)[1]
+        selector = tf.one_hot(tf.cast(not_null_count - 1, tf.int32), depth=sentence_length)
+        selector = tf.expand_dims(selector, axis=2)
+
+        final_lstm_output = tf.reduce_sum(selector * self.lstm_outputs, axis=1)
+        single_dim_logit = tf.reduce_sum(final_lstm_output * self.image_proj, axis=1)
         single_dim_logit = tf.reshape(single_dim_logit, [-1, 1])
 
         self.logits = tf.concat([-1 * single_dim_logit, single_dim_logit], axis=1)  # pos 1 is demo
-        self.rewards = tf.squeeze(layer_utils.affine_transform(self.lstm_outputs, 1, 'hidden_to_reward'), axis=2)
+
+        word_relevancy = tf.reduce_sum(tf.expand_dims(self.image_proj, axis=1) * self.lstm_outputs, axis=2)
+        self.rewards = word_relevancy
 
     def get_logits(self):
         return self.logits
