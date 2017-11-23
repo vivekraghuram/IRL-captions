@@ -147,11 +147,10 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 5 == 0:
+            if i % 5== 0:
                 print("iter {}, loss: {}".format(i, output.loss))
-
                 if self.discr.is_classification:
-                    self.print_classification_result(demo_or_sampled_batch, output.pred)
+                    self.print_classification_result(demo_or_sampled_batch, output.pred, "train")
 
             if validate:
                 if i % 5 == 0:
@@ -163,8 +162,8 @@ class DiscriminatorWrapper(object):
         return train_losses, val_losses
 
     @staticmethod
-    def print_classification_result(demo_or_sampled_batch, pred):
-        print("accuracy: ", accuracy_score(y_true=demo_or_sampled_batch, y_pred=pred))
+    def print_classification_result(demo_or_sampled_batch, pred, split):
+        print("{} accuracy: {}".format(split, accuracy_score(y_true=demo_or_sampled_batch, y_pred=pred)))
         print(confusion_matrix(y_true=demo_or_sampled_batch, y_pred=pred))
 
     def _train_one_iter(self, sess, image_idx_batch, caption_batch, demo_or_sampled_batch):
@@ -336,16 +335,14 @@ class DiscriminatorWrapper(object):
             plt.axis('off')
             plt.show()
 
-    def examine_validation(self, sess, batch_size=100, to_examine=True):
+    def examine_validation(self, sess, batch_size=100, to_examine=True, print_acc=False):
         image_idx_batch, caption_batch, demo_or_sampled_batch = self.process_mini_batch(self.val_demo_batcher,
                                                                                         self.val_sample_batcher,
                                                                                         batch_size)
         caption_batch = caption_batch[:, 1:]
         output = self.run_validation(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
-
-        if self.discr.is_classification:
-            self.print_classification_result(demo_or_sampled_batch, output.pred)
-
+        if self.discr.is_classification and print_acc:
+            self.print_classification_result(demo_or_sampled_batch, output.pred, "val")
         if to_examine:
             self.examine(self.val_data, image_idx_batch, caption_batch, output, demo_or_sampled_batch)
         return output.loss

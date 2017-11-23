@@ -57,7 +57,6 @@ class VanillaDotProduct(object):
 
 
 class DiscriminatorClassification(BaseDiscriminator):
-
     def _compute_reward_and_loss(self, reward_config):
         print("Building classification")
         cls = self.build_classification_model()
@@ -123,66 +122,102 @@ class TextualAttention(object):
         self.image_feature_dim = image_feature_dim
         self.pooling_stride = 2
 
+        # image param
+        self.conv_output_dim = 512
+        self.img_mlp_hidden_size = 1024
+        self.img_proj_dim = 2048
+
         self.alphas = None
         self.logits = None
         self.rewards = None
 
         self.attention_cname = "attention_results"
 
-    def build(self, caption_input, not_null_count, image_input, scope):
+    def _caption_lstm_output(self, caption_input, scope):
 
-        def get_mean_caption():
-            return tf.reduce_sum(caption_input, axis=1) / tf.expand_dims(not_null_count, axis=1)
+        init_state = layer_utils.affine_transform(tf.reduce_max(caption_input, axis=1), self.hidden_dim, scope="init")
 
-        conv_output_size = 1024
-        image_pooled = self._conv_layer(image_input, self.pooling_stride, conv_output_size)
-        pooled_part_num = math.ceil(math.sqrt(self.image_part_num) / self.pooling_stride)
-        total_regions = pooled_part_num * pooled_part_num
-        image_parts = tf.reshape(image_pooled, [-1, total_regions, conv_output_size])
+        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state*0)
 
         with tf.variable_scope(scope):
-            mean_caption = get_mean_caption()
-            init_hidden_state = layer_utils.affine_transform(mean_caption, self.hidden_dim, "init_h")
-            init_cell_state = layer_utils.affine_transform(mean_caption, self.hidden_dim, "init_c")
-            state = tf.nn.rnn_cell.LSTMStateTuple(init_cell_state, init_hidden_state)
-            output = init_hidden_state
+            cell = tf.nn.rnn_cell.LSTMCell(self.hidden_dim)
+            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input, time_major=False, dtype=tf.float32,
+                                               initial_state=initial_lstm_state)
+
+        return lstm_output
+
+    def _image_layers(self, image_input):
+
+        def multi_scale_layers(img_arg, stride, output_num, scope):
+            with tf.variable_scope(scope):
+                out = layers.convolution2d(img_arg, num_outputs=output_num, kernel_size=3, stride=stride,
+                                           activation_fn=tf.nn.relu)
+                out = layers.flatten(out)
+                return out
+
+        strides = [1, 2, 4]
+        img_diff_res = []
+        for s in strides:
+            img_diff_res.append(multi_scale_layers(image_input, s, self.conv_output_dim, "conv_s{}".format(s)))
+
+        img_projs = []
+        for i, img in enumerate(img_diff_res):
+            img_projs.append(layer_utils.build_mlp(img, self.hidden_dim,
+                                                   n_layers=3 - i,
+                                                   size=self.hidden_dim,
+                                                   activation=tf.nn.relu,
+                                                   scope="img_proj{}".format(i)))
+
+        return img_projs
+
+    def build(self, caption_input, not_null_count, image_input, scope):
+
+        image_parts = self._image_layers(image_input) # dim 2048
+        total_regions = len(image_parts)
+
+        word_projection = self._caption_lstm_output(caption_input, "lstm_words")
+
+        with tf.variable_scope(scope):
+            prev_img = image_parts[0]
 
             sentence_length = tf.shape(caption_input)[1]
 
             with tf.variable_scope("attentive_lstm") as lstm_scope:
                 output_seq = []
                 alpha_seq = []
-                for idx in range(total_regions):
+                for idx in range(1, total_regions):
                     # previous output context
-                    prev_ctx = layer_utils.affine_transform(output, self.attention_dim, scope="prev_to_context")
-                    prev_ctx = tf.tile(tf.expand_dims(prev_ctx, 1), [1, sentence_length, 1])
+                    prev_ctx = tf.tile(tf.expand_dims(prev_img, 1), [1, sentence_length, 1])
 
-                    word_projection = layer_utils.affine_transform(caption_input, self.attention_dim,
-                                                                   scope="words_to_ann")
-                    ctx = tf.nn.relu(word_projection + prev_ctx)
-                    ctx = tf.squeeze(layer_utils.affine_transform(ctx, 1, scope="context"), axis=2)
+                    # ctx = tf.nn.relu(word_projection + prev_ctx)
+                    # ctx = tf.squeeze(layer_utils.affine_transform(ctx, 1, scope="context"), axis=2)
+
+                    ctx = tf.reduce_sum(word_projection * prev_ctx, axis=2)
+
                     alpha = tf.nn.softmax(ctx)
 
-                    weighted_ctx = tf.reduce_mean(word_projection * tf.expand_dims(alpha, 2), axis=1)
+                    weighted_ctx = tf.reduce_mean(word_projection, axis=1)
 
-                    lstm = tf.nn.rnn_cell.LSTMCell(self.hidden_dim,
-                                                   initializer=tf.random_normal_initializer(stddev=0.03))
-
-                    image_part = image_parts[:, idx]
-                    lstm_input = tf.concat([image_part, weighted_ctx], axis=1)
-                    output, state = lstm(lstm_input, state)
+                    image_part = image_parts[idx]
+                    print("img part: ", image_part)
+                    print("weighted contx: ", weighted_ctx)
+                    output = tf.concat([image_part, weighted_ctx], axis=1)
 
                     output_seq.append(output)
                     alpha_seq.append(alpha)
                     lstm_scope.reuse_variables()
 
-                output = tf.stack(output_seq, axis=1)
+                    prev_img = image_part
+
+                final_output = tf.concat(output_seq, axis=1)
+                print("final output: ", final_output)
                 all_alphas = tf.stack(alpha_seq, axis=1)
 
         self.alphas = tf.reduce_max(all_alphas, axis=1)
 
         tf.add_to_collection(self.attention_cname, self.alphas)
-        self.logits = self.enriched_image_to_prediction(output, pooled_part_num, "2d_pooling")
+        self.logits = layer_utils.build_mlp(final_output, output_size=2, size=512, scope=scope,activation=tf.nn.relu)
+        print("logits: ", self.logits)
         self.rewards = self.get_rewards_over_words()
 
     def get_alphas(self, graph=None):
