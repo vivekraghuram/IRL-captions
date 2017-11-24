@@ -6,6 +6,13 @@ import math
 from discriminator.discriminator import BaseDiscriminator
 
 
+def select_from_sequence(sequence, sequence_length, index_pos):
+    selector = tf.one_hot(tf.cast(index_pos, tf.int32), depth=sequence_length)
+    selector = tf.expand_dims(selector, axis=2)
+    final_lstm_output = tf.reduce_sum(selector * sequence, axis=1)
+    return final_lstm_output
+
+
 class VanillaDotProduct(object):
     def __init__(self, hidden_dim):
         self.hidden_dim = hidden_dim
@@ -36,11 +43,11 @@ class VanillaDotProduct(object):
         with tf.variable_scope("img_proj"):
             self.image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
 
-        sentence_length = tf.shape(caption_input)[1]
-        selector = tf.one_hot(tf.cast(not_null_count - 1, tf.int32), depth=sentence_length)
-        selector = tf.expand_dims(selector, axis=2)
+        outputs = self.lstm_outputs
 
-        final_lstm_output = tf.reduce_sum(selector * self.lstm_outputs, axis=1)
+        sentence_length = tf.shape(caption_input)[1]
+        final_lstm_output = select_from_sequence(outputs, sentence_length, not_null_count - 1)
+
         single_dim_logit = tf.reduce_sum(final_lstm_output * self.image_proj, axis=1)
         single_dim_logit = tf.reshape(single_dim_logit, [-1, 1])
 
@@ -77,9 +84,10 @@ class DiscriminatorClassification(BaseDiscriminator):
 
     def _secondary_loss(self):
         if self.is_attention:
-            masked_alpha = self.learner_model.get_alphas() * self.caption_input.get_not_null_numeric_mask()
-            loss = tf.reduce_mean(tf.square(1 - tf.reduce_sum(masked_alpha, axis=1)))
-            return 0.05 * loss
+            # masked_alpha = self.learner_model.get_alphas() * self.caption_input.get_not_null_numeric_mask()
+            # loss = tf.reduce_mean(tf.square(1 - tf.reduce_sum(masked_alpha, axis=1)))
+            # return 0.05 * loss
+            return 0
         else:
             return 0
 
@@ -133,17 +141,17 @@ class TextualAttention(object):
 
         self.attention_cname = "attention_results"
 
-    def _caption_lstm_output(self, caption_input, scope):
+    def _caption_lstm_output(self, caption_input, not_null_count, scope):
 
         init_state = layer_utils.affine_transform(tf.reduce_max(caption_input, axis=1), self.hidden_dim, scope="init")
-
-        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state*0)
+        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state * 0)
 
         with tf.variable_scope(scope):
             cell = tf.nn.rnn_cell.LSTMCell(self.hidden_dim)
-            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input, time_major=False, dtype=tf.float32,
+            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input,
+                                               sequence_length=not_null_count, time_major=False,
+                                               dtype=tf.float32,
                                                initial_state=initial_lstm_state)
-
         return lstm_output
 
     def _image_layers(self, image_input):
@@ -172,52 +180,32 @@ class TextualAttention(object):
 
     def build(self, caption_input, not_null_count, image_input, scope):
 
-        image_parts = self._image_layers(image_input) # dim 2048
-        total_regions = len(image_parts)
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, scope="lstm_output")
+        sentence_length = tf.shape(caption_input)[1]
+        lstm_final = select_from_sequence(lstm_ouput, sentence_length, not_null_count - 1)
 
-        word_projection = self._caption_lstm_output(caption_input, "lstm_words")
+        with tf.variable_scope("img_proj"):
+            image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
+        mean_img = tf.reduce_mean(tf.reduce_mean(image_proj, axis=2), axis=1)
 
-        with tf.variable_scope(scope):
-            prev_img = image_parts[0]
+        final_output_expanded = tf.expand_dims(tf.expand_dims(lstm_final, axis=1), axis=2)
+        word_relevancy = tf.reduce_sum(final_output_expanded * image_proj, axis=3)
 
-            sentence_length = tf.shape(caption_input)[1]
+        print("final lstm expanded: ", final_output_expanded)
+        print("word rel: ", word_relevancy)
+        relevancy_map = tf.expand_dims(word_relevancy, axis=3)
+        print("relevancy map: ", relevancy_map)
+        conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
+        flat_rel = layers.flatten(conv_rel)
+        print("flat rel: ", flat_rel)
+        logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
 
-            with tf.variable_scope("attentive_lstm") as lstm_scope:
-                output_seq = []
-                alpha_seq = []
-                for idx in range(1, total_regions):
-                    # previous output context
-                    prev_ctx = tf.tile(tf.expand_dims(prev_img, 1), [1, sentence_length, 1])
-
-                    # ctx = tf.nn.relu(word_projection + prev_ctx)
-                    # ctx = tf.squeeze(layer_utils.affine_transform(ctx, 1, scope="context"), axis=2)
-
-                    ctx = tf.reduce_sum(word_projection * prev_ctx, axis=2)
-
-                    alpha = tf.nn.softmax(ctx)
-
-                    weighted_ctx = tf.reduce_mean(word_projection, axis=1)
-
-                    image_part = image_parts[idx]
-                    print("img part: ", image_part)
-                    print("weighted contx: ", weighted_ctx)
-                    output = tf.concat([image_part, weighted_ctx], axis=1)
-
-                    output_seq.append(output)
-                    alpha_seq.append(alpha)
-                    lstm_scope.reuse_variables()
-
-                    prev_img = image_part
-
-                final_output = tf.concat(output_seq, axis=1)
-                print("final output: ", final_output)
-                all_alphas = tf.stack(alpha_seq, axis=1)
-
-        self.alphas = tf.reduce_max(all_alphas, axis=1)
-
+        self.alphas = tf.reduce_sum(tf.expand_dims(mean_img, axis=1) * lstm_ouput, axis=2)
         tf.add_to_collection(self.attention_cname, self.alphas)
-        self.logits = layer_utils.build_mlp(final_output, output_size=2, size=512, scope=scope,activation=tf.nn.relu)
+        self.logits = logits
         print("logits: ", self.logits)
+
+        # TODO: change this for restricted softmax
         self.rewards = self.get_rewards_over_words()
 
     def get_alphas(self, graph=None):
@@ -232,6 +220,8 @@ class TextualAttention(object):
         with tf.variable_scope(scope, reuse=reuse):
             with tf.variable_scope("max_pooling"):
                 out = layers.max_pool2d(un_flattened, kernel_size=(2, 2))
+
+                layers.conv2d()
             out = layers.flatten(out)
             with tf.variable_scope("label_logits"):
                 logits = layer_utils.build_mlp(out, output_size=num_class, size=4096, scope=scope,
