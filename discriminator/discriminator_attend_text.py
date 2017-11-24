@@ -1,6 +1,7 @@
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
 import layer_utils
+import math
 
 from discriminator.discriminator import BaseDiscriminator
 
@@ -15,6 +16,17 @@ def select_from_sequence(sequence, sequence_length, index_pos):
 def conv_image_context(image_input, output_size, k_size=2, dilation=2):
     return layers.conv2d(image_input, num_outputs=output_size, kernel_size=k_size, activation_fn=tf.nn.relu,
                          rate=dilation)
+
+def restricted_softmax_on_sequence(logits, sentence_length, not_null_count):
+    large_neg = (logits * 0) - 100000
+    sequence_mask = tf.sequence_mask(tf.cast(not_null_count, dtype=tf.int32), sentence_length)
+    print("seq mask: ", sequence_mask)
+    binary_mask = tf.cast(sequence_mask, dtype=tf.float32)
+
+    large_neg_on_empty = large_neg * (1 - binary_mask)
+
+    print("bin mask: ", binary_mask)
+    return tf.nn.softmax(logits + large_neg_on_empty)
 
 
 class VanillaDotProduct(object):
@@ -196,53 +208,11 @@ class TextualAttention(object):
         print("bin mask: ", binary_mask)
         return tf.nn.softmax(logits + large_neg_on_empty)
 
+
+
     def build(self, caption_input, not_null_count, image_input, scope):
 
-        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, scope="lstm_output")
-        sentence_len = tf.shape(caption_input)[1]
-        img_width = tf.shape(image_input)[1]
-
-        ctx_dim = 512
-        lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
-        img_ctx = conv_image_context(image_input, ctx_dim)
-        print("lstm word ctx: ", lstm_word_ctx)
-        print("img_ctx: ", img_ctx)
-
-        expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
-        expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
-        element_wise_mul = expanded_img_ctx * expanded_lstm_ctx
-        # dot-product map (?, img_width, img_width, sen_len)
-        ctx_map = tf.reduce_sum(element_wise_mul, axis=4)
-
-        # alphas (?, img_width, img_width, sen_len)
-        alphas = self.restricted_softmax_on_map(ctx_map, sentence_len, not_null_count)
-        print("ctx map: ", ctx_map)
-
-        # tiled lstm (?, img_width, img_width, sen_len, hidden_dim)
-        tiled_lstm = tf.tile(expanded_lstm_ctx,[1, img_width, img_width, 1, 1])
-        expanded_alpha = tf.expand_dims(alphas, axis=4)
-        weighted_ctx = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)  # (?, img_width, img_width, hidden_dim)
-        print("weighed contxt: ", weighted_ctx)
-        print("image input: ", image_input)
-
-        with tf.variable_scope("img_proj"):
-            image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
-
-        relevancy_map = tf.reduce_sum(weighted_ctx * image_proj, axis=3)
-        print("relevancy map: ", relevancy_map)
-        conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
-        flat_rel = layers.flatten(conv_rel)
-        print("flat rel: ", flat_rel)
-        logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
-
-        self.alphas = tf.reduce_max(tf.reduce_max(alphas, axis=1), axis=1)
-        print("final alpahas: ", self.alphas)
-        tf.add_to_collection(self.attention_cname, self.alphas)
-        self.logits = logits
-        print("logits: ", self.logits)
-
-        # TODO: change this for restricted softmax
-        self.rewards = self.get_rewards_over_words()
+        self.build_on_dilated_img_ctx(caption_input, image_input, not_null_count, scope)
 
     def get_alphas(self, graph=None):
         if graph:
@@ -280,3 +250,60 @@ class TextualAttention(object):
             out = layers.convolution2d(img, num_outputs=output_num, kernel_size=3, stride=1, activation_fn=tf.nn.relu)
             out = layers.max_pool2d(out, kernel_size=(2, 2), stride=pool_stride, padding='SAME')
             return out
+
+    def build_on_dilated_img_ctx(self, caption_input, image_input, not_null_count, scope):
+        conv_output_size = 1024
+        image_input = self._conv_layer(image_input, self.pooling_stride, conv_output_size)
+        print("image_input: ", image_input)
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, scope="lstm_output")
+        sentence_len = tf.shape(caption_input)[1]
+        img_width = tf.shape(image_input)[1]
+        print("lstm output: ", lstm_ouput)
+        ctx_dim = self.hidden_dim
+        lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
+        img_ctx = conv_image_context(image_input, ctx_dim)
+        print("lstm word ctx: ", lstm_word_ctx)
+        print("img_ctx: ", img_ctx)
+        expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
+        expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
+        element_wise_mul = expanded_img_ctx * expanded_lstm_ctx
+        # dot-product map (?, img_width, img_width, sen_len)
+        ctx_map = tf.abs(tf.reduce_sum(element_wise_mul, axis=4))
+        # alphas (?, img_width, img_width, sen_len)
+        alphas = self.restricted_softmax_on_map(ctx_map, sentence_len, not_null_count)
+        print("ctx map: ", ctx_map)
+        # tiled lstm (?, img_width, img_width, sen_len, hidden_dim)
+        tiled_lstm = tf.tile(expanded_lstm_ctx, [1, img_width, img_width, 1, 1])
+        expanded_alpha = tf.expand_dims(alphas, axis=4)
+        weighted_ctx = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)  # (?, img_width, img_width, hidden_dim)
+        print("weighed contxt: ", weighted_ctx)
+        print("image input: ", image_input)
+        # sum_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1),axis=1)
+        # sum_alpha = tf.reduce_sum(sum_alpha, axis=1)
+        max_alphas = tf.reduce_max(tf.reduce_max(alphas, axis=1), axis=1)
+        overall_alpha = restricted_softmax_on_sequence(max_alphas, sentence_len, not_null_count)
+        print("overall alpha:", overall_alpha)
+        overall_output = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_overall")
+        overall_output = tf.reduce_sum(tf.expand_dims(overall_alpha, axis=-1) * overall_output, axis=1)
+        overall_output = tf.expand_dims(tf.expand_dims(overall_output, axis=1), axis=2)
+        print("overall output: ", overall_output)
+        self.alphas = overall_alpha
+        with tf.variable_scope("img_proj1"):
+            image_proj1 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
+        relevancy_map = tf.reduce_sum(weighted_ctx * image_proj1, axis=3)
+        with tf.variable_scope("img_proj"):
+            image_proj2 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
+        overall_rel = tf.reduce_sum(overall_output * image_proj2, axis=3)
+        print("relevancy map: ", relevancy_map)
+        conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
+        flat_rel = layers.flatten(conv_rel)
+        overall_conv_rel = layers.conv2d(overall_rel, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
+        overall_flat_rel = layers.flatten(overall_conv_rel)
+        print("flat rel: ", flat_rel)
+        logits = layer_utils.affine_transform(tf.concat([flat_rel, overall_flat_rel], axis=1), 2, scope="rel_to_logits")
+        print("final alpahas: ", self.alphas)
+        # print("sum alphs: ", sum_alpha)
+        tf.add_to_collection(self.attention_cname, self.alphas)
+        self.logits = logits
+        print("logits: ", self.logits)
+        self.rewards = self.get_rewards_over_words()

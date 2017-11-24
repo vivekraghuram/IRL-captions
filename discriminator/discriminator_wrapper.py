@@ -147,7 +147,7 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 5== 0:
+            if i % 5 == 0:
                 print("iter {}, loss: {}".format(i, output.loss))
                 if self.discr.is_classification:
                     self.print_classification_result(demo_or_sampled_batch, output.pred, "train")
@@ -306,7 +306,7 @@ class DiscriminatorWrapper(object):
             self.show_image_by_image_idxs(coco_data, [img_idx])
             decoded = self.vocab_data.decode_captions(cap).split()
             for (j, k, l) in zip(decoded, reward, output.attention[i]):
-                print("{:<15} {:<15}, attn: {}".format(j, two_sf(k), two_sf(l)))
+                print("{:<15} {:<15} attn: {}".format(j, two_sf(k), two_sf(l)))
             print("- - - -")
 
         def examine_reward_by_word(i, img_idx, cap, reward, mean_reward):
