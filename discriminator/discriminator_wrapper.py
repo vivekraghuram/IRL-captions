@@ -10,7 +10,6 @@ from image_utils import image_from_url
 
 
 class DiscriminatorWrapper(object):
-
     def __init__(self, train_data, val_data, vocab_data,
                  hidden_dim=512,
                  load_session=None, saved_model_name=None, model_base_dir="models/discr"):
@@ -148,7 +147,9 @@ class DiscriminatorWrapper(object):
         demo_or_sampled_batch = np.concatenate([demo_or_sampled_batch1, demo_or_sampled_batch2], axis=0)
         return image_idx_batch, caption_batch, demo_or_sampled_batch
 
-    def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=False):
+    def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=False,
+                      max_step=16):
+
         captions = [c.split() for c in caption_sentences]
 
         if image_idx_from_training:
@@ -160,6 +161,7 @@ class DiscriminatorWrapper(object):
 
         if self.has_attention_model():
             # max len - 1, without start token during train
+            assert caption_test.shape[0] > (coco_data.max_caption_len - 1), "Attention requires max caption length of {}".format(coco_data.max_caption_len - 1)
             additional = coco_data.max_caption_len - caption_test.shape[1] - 1
             nulls = self.vocab_data.get_null_ids((caption_test.shape[0], additional))
             caption_test = np.concatenate((caption_test, nulls), axis=1)
@@ -167,7 +169,13 @@ class DiscriminatorWrapper(object):
         output = self.run_test(sess, image_feats_test, caption_test)
         if to_examine:
             self.examine(coco_data, img_idxs, caption_test, output.masked_reward, output.mean_reward_per_sentence)
-        return output.loss, output.masked_reward, output.mean_reward_per_sentence
+
+        if max_step < caption_test.shape[0]:
+            rewards = output.masked_reward[:, :max_step]
+        else:
+            rewards = output.masked_reward
+
+        return output.loss, rewards, output.mean_reward_per_sentence
 
     def run_validation(self, sess, img_idxs, caption_word_idx, demo_or_sampled_batch):
         image_feats = self.val_data.get_image_features(img_idxs)
@@ -228,10 +236,9 @@ class DiscriminatorWrapper(object):
         caption_batch = caption_batch[:, 1:]
         output = self.run_validation(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
         if to_examine:
-            self.examine(self.val_data, image_idx_batch, caption_batch, output.masked_reward, output.mean_reward_per_sentence)
+            self.examine(self.val_data, image_idx_batch, caption_batch, output.masked_reward,
+                         output.mean_reward_per_sentence)
         return output.loss
 
     def save_model(self, sess, model_name):
         self.discr.save_model(sess, model_name='{}/{}'.format(self.model_base_dir, model_name))
-
-
