@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# 
+#
 # File Name : bleu.py
 #
 # Description : Wrapper for BLEU scorer.
@@ -8,7 +8,8 @@
 # Last Modified : Thu 19 Mar 2015 09:13:28 PM PDT
 # Authors : Hao Fang <hfang@uw.edu> and Tsung-Yi Lin <tl483@cornell.edu>
 
-from bleu_scorer import BleuScorer
+from .bleu_scorer import BleuScorer
+import numpy as np
 
 
 class Bleu:
@@ -24,24 +25,29 @@ class Bleu:
         imgIds = sorted(gts.keys())
 
         bleu_scorer = BleuScorer(n=self._n)
+        hypo_len = len(res[imgIds[0]])
         for id in imgIds:
             hypo = res[id]
             ref = gts[id]
 
             # Sanity check.
             assert(type(hypo) is list)
-            assert(len(hypo) == 1)
+            assert(len(hypo) == hypo_len)
             assert(type(ref) is list)
             assert(len(ref) >= 1)
 
-            bleu_scorer += (hypo[0], ref)
+            for i in range(hypo_len):
+              bleu_scorer += (hypo[i], ref)
 
         #score, scores = bleu_scorer.compute_score(option='shortest')
         score, scores = bleu_scorer.compute_score(option='closest', verbose=1)
         #score, scores = bleu_scorer.compute_score(option='average', verbose=1)
 
         # return (bleu, bleu_info)
-        return score, scores
+        # return score, scores
+        scores = np.array(scores)
+        scores = scores.reshape((hypo_len * len(imgIds), 4))
+        return scores[:, -1]
 
     def method(self):
         return "Bleu"

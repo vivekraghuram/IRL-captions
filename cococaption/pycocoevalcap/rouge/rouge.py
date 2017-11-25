@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-# 
+#
 # File Name : rouge.py
 #
 # Description : Computes ROUGE-L metric as described by Lin and Hovey (2004)
@@ -49,14 +49,14 @@ class Rouge():
         :param refs: list of str : COCO reference sentences for the particular image to be evaluated
         :returns score: int (ROUGE-L score for the candidate evaluated against references)
         """
-        assert(len(candidate)==1)	
-        assert(len(refs)>0)         
+        assert(len(candidate)==1)
+        assert(len(refs)>0)
         prec = []
         rec = []
 
         # split into tokens
         token_c = candidate[0].split(" ")
-    	
+
         for reference in refs:
             # split into tokens
             token_r = reference.split(" ")
@@ -77,8 +77,8 @@ class Rouge():
     def compute_score(self, gts, res):
         """
         Computes Rouge-L score given a set of reference and candidate sentences for the dataset
-        Invoked by evaluate_captions.py 
-        :param hypo_for_image: dict : candidate / test sentences with "image name" key and "tokenized sentences" as values 
+        Invoked by evaluate_captions.py
+        :param hypo_for_image: dict : candidate / test sentences with "image name" key and "tokenized sentences" as values
         :param ref_for_image: dict : reference MS-COCO sentences with "image name" key and "tokenized sentences" as values
         :returns: average_score: float (mean ROUGE-L score computed by averaging scores for all the images)
         """
@@ -86,20 +86,23 @@ class Rouge():
         imgIds = sorted(gts.keys())
 
         score = []
+        hypo_len = len(res[imgIds[0]])
         for id in imgIds:
-            hypo = res[id]
+            hypo_list = res[id]
             ref  = gts[id]
 
-            score.append(self.calc_score(hypo, ref))
+            for hypo in hypo_list:
+              score.append(self.calc_score([hypo], ref))
 
             # Sanity check.
-            assert(type(hypo) is list)
-            assert(len(hypo) == 1)
+            # assert(type(hypo) is list)
+            assert(len(hypo_list) == hypo_len)
             assert(type(ref) is list)
             assert(len(ref) >= 1)
 
-        average_score = np.mean(np.array(score))
-        return average_score, np.array(score)
+        # average_score = np.mean(np.array(score))
+        # return average_score, np.array(score)
+        return np.array(score)
 
     def method(self):
         return "Rouge"
