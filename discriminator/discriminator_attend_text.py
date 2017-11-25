@@ -101,10 +101,14 @@ class DiscriminatorClassification(BaseDiscriminator):
 
     def _secondary_loss(self):
         if self.is_attention:
-            # masked_alpha = self.learner_model.get_alphas() * self.caption_input.get_not_null_numeric_mask()
-            # loss = tf.reduce_mean(tf.square(1 - tf.reduce_sum(masked_alpha, axis=1)))
-            # return 0.05 * loss
-            return 0
+            loss = 1 - self.learner_model.get_alphas()
+            masked_loss = loss * self.caption_input.get_not_null_numeric_mask()
+            print("masked alpha loss: ", masked_loss)
+
+            mean_loss = tf.reduce_sum(masked_loss, axis=-1) / self.caption_input.get_not_null_count()
+            batch_loss = tf.reduce_mean(mean_loss)
+            print("batch alpha loss: ", batch_loss)
+            return 0.5 * batch_loss
         else:
             return 0
 
@@ -228,7 +232,7 @@ class TextualAttention(object):
 
     def build(self, caption_input, not_null_count, image_input, scope):
 
-        which_model = TextualAttention.model_relevancy_map
+        which_model = TextualAttention.model_dilated
 
         print("Building {}..".format(which_model))
         if which_model == TextualAttention.model_dilated:
@@ -277,7 +281,7 @@ class TextualAttention(object):
         conv_output_size = 1024
         image_input = self._conv_layer(image_input, self.pooling_stride, conv_output_size)
         print("image_input: ", image_input)
-        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, scope="lstm_output")
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim, scope="lstm_output")
         sentence_len = tf.shape(caption_input)[1]
         img_width = tf.shape(image_input)[1]
         print("lstm output: ", lstm_ouput)
@@ -286,6 +290,7 @@ class TextualAttention(object):
         img_ctx = conv_image_context(image_input, ctx_dim)
         print("lstm word ctx: ", lstm_word_ctx)
         print("img_ctx: ", img_ctx)
+
         expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
         expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
         element_wise_mul = expanded_img_ctx * expanded_lstm_ctx
@@ -299,30 +304,20 @@ class TextualAttention(object):
         expanded_alpha = tf.expand_dims(alphas, axis=4)
         weighted_ctx = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)  # (?, img_width, img_width, hidden_dim)
         print("weighed contxt: ", weighted_ctx)
-        print("image input: ", image_input)
-        # sum_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1),axis=1)
-        # sum_alpha = tf.reduce_sum(sum_alpha, axis=1)
-        max_alphas = tf.reduce_max(tf.reduce_max(alphas, axis=1), axis=1)
-        overall_alpha = restricted_softmax_on_sequence(max_alphas, sentence_len, not_null_count)
+
+        summed_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1), axis=1)
+        overall_alpha = summed_alpha / tf.cast(img_width * img_width, tf.float32)
         print("overall alpha:", overall_alpha)
-        overall_output = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_overall")
-        overall_output = tf.reduce_sum(tf.expand_dims(overall_alpha, axis=-1) * overall_output, axis=1)
-        overall_output = tf.expand_dims(tf.expand_dims(overall_output, axis=1), axis=2)
-        print("overall output: ", overall_output)
         self.alphas = overall_alpha
+
         with tf.variable_scope("img_proj1"):
             image_proj1 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
         relevancy_map = tf.reduce_sum(weighted_ctx * image_proj1, axis=3)
-        with tf.variable_scope("img_proj"):
-            image_proj2 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
-        overall_rel = tf.reduce_sum(overall_output * image_proj2, axis=3)
         print("relevancy map: ", relevancy_map)
         conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
         flat_rel = layers.flatten(conv_rel)
-        overall_conv_rel = layers.conv2d(overall_rel, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
-        overall_flat_rel = layers.flatten(overall_conv_rel)
         print("flat rel: ", flat_rel)
-        logits = layer_utils.affine_transform(tf.concat([flat_rel, overall_flat_rel], axis=1), 2, scope="rel_to_logits")
+        logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
         print("final alpahas: ", self.alphas)
         # print("sum alphs: ", sum_alpha)
         tf.add_to_collection(self.attention_cname, self.alphas)
