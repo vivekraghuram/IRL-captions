@@ -1,6 +1,11 @@
 import numpy as np
 import tensorflow as tf
-from pyciderevalcap.eval import CIDErEvalCap as ciderEval
+from cococaption.pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
+from cococaption.pycocoevalcap.cider.cider import Cider
+# from cococaption.pycocoevalcap.spice.spice import Spice
+# from cococaption.pycocoevalcap.bleu.bleu import Bleu
+# from cococaption.pycocoevalcap.rouge.rouge import Rouge
+# from cococaption.pycocoevalcap.meteor.meteor import Meteor
 from collections import namedtuple
 from generator.generator import Generator
 
@@ -25,6 +30,7 @@ class GeneratorWrapper(object):
     self._discriminator_reward = discriminator_reward
     self.reward_to_go = reward_to_go
     self.use_discriminator_reward = use_discriminator_reward
+    self.scorer = Cider()
 
   def save(self, sess, modelname, modeldir="models"):
     saver = tf.train.Saver()
@@ -122,7 +128,11 @@ class GeneratorWrapper(object):
     q_mean, q_std = np.mean(q_n), np.std(q_n)
     adv_n = q_n - (q_mean + q_std * b_n)
 
-    target_q_n = (adv_n - q_mean) / q_std
+    # Advantage normalization
+    adv_mean, adv_std = np.mean(adv_n), max(np.std(adv_n), 0.00000001)
+    adv_n = (adv_n - adv_mean) / adv_std
+
+    target_q_n = (q_n - q_mean) / q_std
     for i in range(target_q_n.shape[1]):
       baseline_update_dict = {
         self.generator.ph_initial_step: i==0,
@@ -185,7 +195,7 @@ class GeneratorWrapper(object):
       image_features, caption_input, captions_GT, img_keys = mini_batch
 
       feed_dict = {
-        self.generator.ph_input            : caption_input,
+        self.generator.ph_input            : caption_input[:, 0:1],
         self.generator.ph_image_feat_input : image_features,
         self.generator.ph_hidden_state     : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
         self.generator.ph_cell_state       : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
@@ -209,9 +219,10 @@ class GeneratorWrapper(object):
         feed_dict[self.generator.ph_initial_step] = False
         feed_dict[self.generator.ph_hidden_state] = rs[0]
         feed_dict[self.generator.ph_cell_state] = rs[1]
-        feed_dict[self.generator.ph_input] = ac
+        feed_dict[self.generator.ph_input] = caption_input[:, i:i+1]#ac
 
-      end_mask = 1 - np.cumsum(actions == data.END_ID, axis=1)
+      end_mask = ((1 - np.cumsum(actions == data.END_ID, axis=1) + (actions == data.END_ID)) == 1).astype(int)
+      assert(np.max(end_mask) == 1)
 
       path = {
         "keys" : [int(key) for key in img_keys],
@@ -229,7 +240,7 @@ class GeneratorWrapper(object):
       if self.use_discriminator_reward:
         reward_func_out = self.discriminator_reward(sess, data, path)
       else:
-        reward_func_out = self.generate_cidre_rewards(sess, data, path, img_keys, captions_GT)
+        reward_func_out = self.generate_cidre_rewards(sess, data, path, img_keys, captions_GT, caption_input)
 
       rewards[0:reward_func_out.shape[0], 0:reward_func_out.shape[1]] = reward_func_out
       path["rewards"] = rewards
@@ -251,13 +262,13 @@ class GeneratorWrapper(object):
 
     return paths_output
 
-  def generate_cidre_rewards(self, sess, data, path, keys, captions_GT, num_samples=10):
+  def generate_cidre_rewards(self, sess, data, path, keys, captions_GT, caption_input, num_samples=3):
     actions = path["actions"]
     observation_image_features = path["observation_image_features"]
     observation_hidden_state = path["observation_hidden_state"]
     observation_cell_state = path["observation_cell_state"]
 
-    cand_list = []
+    cand_dict = {}
 
     for i in range(self.gen_spec.n_seq_steps):
       for j in range(num_samples):
@@ -278,23 +289,83 @@ class GeneratorWrapper(object):
 
             feed_dict[self.generator.ph_hidden_state] = rs[0]
             feed_dict[self.generator.ph_cell_state] = rs[1]
-            feed_dict[self.generator.ph_input] = ac
+            feed_dict[self.generator.ph_input] = caption_input[:, k:k+1]#ac
 
             sampled_actions[:, k] = ac[:, 0]
 
         candidates = data.decode(sampled_actions)
         assert(len(candidates) == len(keys))
         for idx, cap in enumerate(candidates):
-          cand_list.append({
-            'image_id': keys[idx],
+          if keys[idx] not in cand_dict:
+            cand_dict[keys[idx]] = []
+          cand_dict[keys[idx]].append({
             'caption': cap
           })
 
-    scorer = ciderEval(captions_GT, cand_list, "coco-val-df")
-    scores = scorer.evaluate()
-    reshaped_scores = np.reshape(scores, (self.gen_spec.n_seq_steps, num_samples, self.gen_spec.batch_size))
-    rewards = np.mean(np.swapaxes(np.swapaxes(reshaped_scores, 1, 2), 0, 1), axis=2)
+    # scorer = ciderEval(captions_GT, cand_list, "coco-val-df")
+    tokenizer = PTBTokenizer()
+    gts = tokenizer.tokenize(captions_GT)
+    res = tokenizer.tokenize(cand_dict)
+    scores = self.scorer.compute_score(gts, res)
+    rewards = np.mean(scores.reshape((self.gen_spec.batch_size, self.gen_spec.n_seq_steps, num_samples)), axis=2)
     return rewards
 
   def discriminator_reward(self, sess, data, path):
     return self._discriminator_reward(sess, path["keys"], path["captions"], image_idx_from_training=True)[1]
+
+  def test(self, sess, data, num_batches=1):
+    """
+    sess: Initialized tensorflow session
+    data: instance of data object
+    returns: predictions, ground truth and logits
+    """
+    data.set_mode('PG').set_batch_size(self.gen_spec.batch_size)
+    predictions = np.zeros((self.gen_spec.batch_size * num_batches, self.gen_spec.n_seq_steps), dtype=int)
+    logits = np.zeros((self.gen_spec.batch_size * num_batches, self.gen_spec.n_seq_steps, self.gen_spec.output_dim), dtype=int)
+    img_idxs = np.zeros((self.gen_spec.batch_size * num_batches), dtype=int)
+    GT = {}
+
+    for itr, mini_batch in enumerate(data.testing_batches):
+      if itr == num_batches:
+        break
+
+      image_features, caption_input, captions_GT, img_keys = mini_batch
+      img_idxs[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size] = np.array(img_keys)[:]
+      GT = {**GT, **captions_GT}
+
+      feed_dict = {
+        self.generator.ph_input            : caption_input[:, 0:1],
+        self.generator.ph_image_feat_input : image_features,
+        self.generator.ph_hidden_state     : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
+        self.generator.ph_cell_state       : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
+        self.generator.ph_initial_step     : True
+      }
+
+
+      for i in range(self.gen_spec.n_seq_steps):
+        p, rs, l = sess.run([self.generator.predictions, self.generator.rnn_state, self.generator.logits],
+                              feed_dict=feed_dict)
+
+        feed_dict[self.generator.ph_initial_step] = False
+        feed_dict[self.generator.ph_hidden_state] = rs[0]
+        feed_dict[self.generator.ph_cell_state] = rs[1]
+
+        assert(p.shape[1] == 1 and p.shape[0] == self.gen_spec.batch_size)
+        assert(l.shape[2] == self.gen_spec.output_dim and l.shape[0] == self.gen_spec.batch_size)
+        feed_dict[self.generator.ph_input] = p
+        predictions[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size, i] = p[:, 0]
+        logits[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size, i, :] = l[:, 0, :]
+
+
+    return predictions, logits, img_idxs, GT
+
+  def set_scorer(self, scorer):
+    """
+    meteor = Meteor()
+    rouge = Rouge()
+    bleu = Bleu()
+    cider = Cider()
+    spice = Spice()
+    """
+    self.scorer = scorer
+    return self
