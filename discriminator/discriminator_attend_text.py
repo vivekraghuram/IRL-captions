@@ -278,27 +278,42 @@ class TextualAttention(object):
             return out
 
     def build_on_dilated_img_ctx(self, caption_input, image_input, not_null_count, scope):
+
+        # reduce the size of image
+        # consider just simply max-pooling to reduce image size without further convolving
         conv_output_size = 1024
         image_input = self._conv_layer(image_input, self.pooling_stride, conv_output_size)
         print("image_input: ", image_input)
+
+        ctx_dim = self.hidden_dim
+
         lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim, scope="lstm_output")
+        lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
+        print("lstm output: ", lstm_ouput)
+        img_ctx = conv_image_context(image_input, ctx_dim)
+
         sentence_len = tf.shape(caption_input)[1]
         img_width = tf.shape(image_input)[1]
-        print("lstm output: ", lstm_ouput)
-        ctx_dim = self.hidden_dim
-        lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
-        img_ctx = conv_image_context(image_input, ctx_dim)
         print("lstm word ctx: ", lstm_word_ctx)
         print("img_ctx: ", img_ctx)
 
         expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
         expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
-        element_wise_mul = expanded_img_ctx * expanded_lstm_ctx
+
+        # expanded_img_ctx = tf.tile(expanded_img_ctx, [1, 1, 1, sentence_len, 1])
+        # expanded_lstm_ctx = tf.tile(expanded_lstm_ctx, [1, img_width, img_width, 1, 1])
+
+        print("tiled img: ", expanded_img_ctx)
+        print("tiled lstm: ", expanded_lstm_ctx)
+
+        # element_wise_mul = tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx)
         # dot-product map (?, img_width, img_width, sen_len)
-        ctx_map = tf.abs(tf.reduce_sum(element_wise_mul, axis=4))
+        ctx_map = layer_utils.affine_transform(tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx), 1, scope="att")
+        ctx_map = tf.squeeze(ctx_map, axis=-1)
+        print("ctx map: ", ctx_map)
+
         # alphas (?, img_width, img_width, sen_len)
         alphas = self.restricted_softmax_on_map(ctx_map, sentence_len, not_null_count)
-        print("ctx map: ", ctx_map)
         # tiled lstm (?, img_width, img_width, sen_len, hidden_dim)
         tiled_lstm = tf.tile(expanded_lstm_ctx, [1, img_width, img_width, 1, 1])
         expanded_alpha = tf.expand_dims(alphas, axis=4)
