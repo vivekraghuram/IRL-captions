@@ -193,7 +193,7 @@ class VisualAttention(object):
                     ctx = tf.squeeze(layer_utils.affine_transform(ctx, 1, scope="context"), axis=2)
                     alpha = tf.nn.softmax(ctx)
 
-                    weighted_ctx = tf.reduce_mean(annotation * tf.expand_dims(alpha, 2), axis=1)
+                    weighted_ctx = tf.reduce_sum(annotation * tf.expand_dims(alpha, 2), axis=1)
 
                     lstm = tf.nn.rnn_cell.LSTMCell(self.hidden_dim,
                                                    initializer=tf.random_normal_initializer(stddev=0.03))

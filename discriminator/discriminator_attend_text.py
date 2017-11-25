@@ -17,6 +17,7 @@ def conv_image_context(image_input, output_size, k_size=2, dilation=2):
     return layers.conv2d(image_input, num_outputs=output_size, kernel_size=k_size, activation_fn=tf.nn.relu,
                          rate=dilation)
 
+
 def restricted_softmax_on_sequence(logits, sentence_length, not_null_count):
     large_neg = (logits * 0) - 100000
     sequence_mask = tf.sequence_mask(tf.cast(not_null_count, dtype=tf.int32), sentence_length)
@@ -127,6 +128,9 @@ class DiscriminatorClassification(BaseDiscriminator):
 
 
 class TextualAttention(object):
+    model_dilated = "dilated_ctx"
+    model_relevancy_map = "rel_map"
+
     def __init__(self,
                  max_sentence_length,
                  image_part_num,
@@ -157,18 +161,32 @@ class TextualAttention(object):
 
         self.attention_cname = "attention_results"
 
-    def _caption_lstm_output(self, caption_input, not_null_count, scope):
+    def _caption_lstm_output(self, caption_input, not_null_count, hidden_dim, scope, is_bidirectional=False):
 
-        init_state = layer_utils.affine_transform(tf.reduce_max(caption_input, axis=1), self.hidden_dim, scope="init")
-        initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(init_state * 0, init_state * 0)
+        init_state_template = tf.identity(caption_input[:, 0])
+        zero_init_state = layer_utils.affine_transform(init_state_template, hidden_dim, scope="init") * 0
 
-        with tf.variable_scope(scope):
-            cell = tf.nn.rnn_cell.LSTMCell(self.hidden_dim)
-            lstm_output, _ = tf.nn.dynamic_rnn(cell, caption_input,
-                                               sequence_length=not_null_count, time_major=False,
-                                               dtype=tf.float32,
-                                               initial_state=initial_lstm_state)
-        return lstm_output
+        seq_len = tf.cast(not_null_count, tf.int32)
+        with tf.variable_scope("bi_{}".format(scope)):
+
+            cell_fw = tf.nn.rnn_cell.LSTMCell(hidden_dim)
+            init_fw = tf.nn.rnn_cell.LSTMStateTuple(zero_init_state, zero_init_state)
+
+            if is_bidirectional:
+                cell_bw = tf.nn.rnn_cell.LSTMCell(hidden_dim)
+                init_bw = tf.nn.rnn_cell.LSTMStateTuple(zero_init_state, zero_init_state)
+
+                bi_lstm_output, _ = tf.nn.bidirectional_dynamic_rnn(cell_fw, cell_bw, caption_input,
+                                                                    sequence_length=seq_len,
+                                                                    initial_state_fw=init_fw, initial_state_bw=init_bw,
+                                                                    dtype=tf.float32, time_major=False)
+                concat_bi_ouput = tf.concat([bi_lstm_output[0], bi_lstm_output[1]], axis=2)
+                print("bi-lstm: ", concat_bi_ouput)
+                return concat_bi_ouput
+            else:
+                output, _ = tf.nn.dynamic_rnn(cell_fw, caption_input, sequence_length=seq_len, initial_state=init_fw,
+                                              dtype=tf.float32, time_major=False)
+                return output
 
     def _image_layers(self, image_input):
 
@@ -208,11 +226,15 @@ class TextualAttention(object):
         print("bin mask: ", binary_mask)
         return tf.nn.softmax(logits + large_neg_on_empty)
 
-
-
     def build(self, caption_input, not_null_count, image_input, scope):
 
-        self.build_on_dilated_img_ctx(caption_input, image_input, not_null_count, scope)
+        which_model = TextualAttention.model_relevancy_map
+
+        print("Building {}..".format(which_model))
+        if which_model == TextualAttention.model_dilated:
+            self.build_on_dilated_img_ctx(caption_input, image_input, not_null_count, scope)
+        elif which_model == TextualAttention.model_relevancy_map:
+            self.build_relevancy_map(caption_input, image_input, not_null_count, scope)
 
     def get_alphas(self, graph=None):
         if graph:
@@ -306,4 +328,36 @@ class TextualAttention(object):
         tf.add_to_collection(self.attention_cname, self.alphas)
         self.logits = logits
         print("logits: ", self.logits)
+        self.rewards = self.get_rewards_over_words()
+
+    def build_relevancy_map(self, caption_input, image_input, not_null_count, scope):
+
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, self.hidden_dim,
+                                               scope="lstm_output", is_bidirectional=True)
+
+        sentence_length = tf.shape(caption_input)[1]
+        mid_lstm = select_from_sequence(lstm_ouput, sentence_length, (not_null_count / 2))
+
+        with tf.variable_scope("img_proj"):
+            image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
+        image_proj = tf.concat([image_proj, image_proj], axis=-1)
+
+        final_output_expanded = tf.expand_dims(tf.expand_dims(mid_lstm, axis=1), axis=2)
+        word_relevancy = tf.reduce_sum(final_output_expanded * image_proj, axis=3)
+
+        print("final lstm expanded: ", final_output_expanded)
+        print("word rel: ", word_relevancy)
+        relevancy_map = tf.expand_dims(word_relevancy, axis=3)
+        print("relevancy map: ", relevancy_map)
+        conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
+        flat_rel = layers.flatten(conv_rel)
+        print("flat rel: ", flat_rel)
+        logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
+
+        mean_img = tf.reduce_mean(tf.reduce_mean(image_proj, axis=2), axis=1)
+        self.alphas = tf.reduce_sum(tf.expand_dims(mean_img, axis=1) * lstm_ouput, axis=2)
+        tf.add_to_collection(self.attention_cname, self.alphas)
+        self.logits = logits
+        print("logits: ", self.logits)
+
         self.rewards = self.get_rewards_over_words()
