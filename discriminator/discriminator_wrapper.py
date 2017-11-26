@@ -9,7 +9,7 @@ from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput,
 from discriminator.discriminator_attend_text import DiscriminatorClassification, TextualAttention, VanillaDotProduct
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
 from discriminator.mini_batcher import MiniBatcher, MixedMiniBatcher
-from image_utils import image_from_url, visualize_attention, visualize_padded_relevancy
+from image_utils import image_from_url, visualize_attention, visualize_padded_relevancy, annotate_words
 from sklearn.metrics import confusion_matrix, accuracy_score
 
 
@@ -316,10 +316,15 @@ class DiscriminatorWrapper(object):
         def examine_reward_by_attentional_word(i, img_idx, cap, reward, mean_reward):
             is_demo = demo_or_sampled[i]
             print(text_mean_reward(i, is_demo, mean_reward))
-            visualize_padded_relevancy(coco_data.image_paths[img_idx], output.etc_map["rel_map"][i])
+            image_path = coco_data.image_paths[img_idx]
+            visualize_padded_relevancy(image_path, output.etc_map["rel_map"][i])
+            decoded = self.vocab_data.decode_captions(cap).split()
+
+            alpha_map = output.etc_map["alpha_map"][i]
+
+            annotate_words(image_path, alpha_map, decoded)
 
             self.show_image_by_image_idxs(coco_data, [img_idx])
-            decoded = self.vocab_data.decode_captions(cap).split()
             for (j, k, l) in zip(decoded, reward, output.attention[i]):
                 print("{:<15} reward: {:<15} attn: {}".format(j, two_sf(k), two_sf(l)))
 

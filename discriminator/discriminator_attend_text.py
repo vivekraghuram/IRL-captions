@@ -91,7 +91,6 @@ class VanillaDotProduct(Learner):
         return self.rewards
 
 
-
 class DiscriminatorClassification(BaseDiscriminator):
     def _compute_reward_and_loss(self, reward_config):
         print("Building classification")
@@ -149,6 +148,7 @@ class DiscriminatorClassification(BaseDiscriminator):
         map.update(self.learner_model.get_other_info())
         return map
 
+
 class TextualAttention(Learner):
     model_dilated = "dilated_ctx"
     model_relevancy_map = "rel_map"
@@ -178,6 +178,7 @@ class TextualAttention(Learner):
         self.img_proj_dim = 2048
 
         self.alphas = None
+        self.alpha_map = None
         self.logits = None
         self.rewards = None
         self.relevancy_map = None
@@ -265,7 +266,10 @@ class TextualAttention(Learner):
             return self.alphas
 
     def get_other_info(self):
-        return {"rel_map": self.relevancy_map}
+        return {
+            "rel_map": self.relevancy_map,
+            "alpha_map": self.alpha_map
+        }
 
     def enriched_image_to_prediction(self, flat_img, pooled_part_num, scope, num_class=2, reuse=False):
 
@@ -294,6 +298,9 @@ class TextualAttention(Learner):
 
     def build_on_dilated_img_ctx(self, caption_input, image_input, not_null_count, scope):
 
+        rel_score = "multiplicative"
+        apply_alpha = "sum_with_weight"
+
         # reduce the size of image
         # consider just simply max-pooling to reduce image size without further convolving
         conv_output_size = 1024
@@ -301,49 +308,37 @@ class TextualAttention(Learner):
         print("image_input: ", image_input)
 
         ctx_dim = self.hidden_dim
+        sentence_len = tf.shape(caption_input)[1]
+        img_width = tf.shape(image_input)[1]
 
         lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
                                                scope="lstm_output")
+        print("lstm output: ", lstm_ouput)
 
-        rel_score = "multiplicative"
         img_ctx = conv_image_context(image_input, ctx_dim)
         print("img_ctx: ", img_ctx)
         expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
 
-        sentence_len = tf.shape(caption_input)[1]
-        img_width = tf.shape(image_input)[1]
-
-        print("lstm output: ", lstm_ouput)
-
         if rel_score == "additive":
             lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
             print("lstm word ctx: ", lstm_word_ctx)
-
             expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
-
             print("tiled img: ", expanded_img_ctx)
             print("tiled lstm: ", expanded_lstm_ctx)
-
-            # dot-product map (?, img_width, img_width, sen_len)
             ctx_map = layer_utils.affine_transform(tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx), 1, scope="att")
             ctx_map = tf.squeeze(ctx_map, axis=-1)
         elif rel_score == "multiplicative":
             print("Multiplicative style: ")
             expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_ouput, axis=1), axis=2)
             element_wise_mul = tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx)
-            ctx_map = tf.abs(tf.reduce_sum(element_wise_mul, axis=4))
-
+            ctx_map = tf.reduce_sum(element_wise_mul, axis=4)
         print("ctx map: ", ctx_map)
 
-        # alphas (?, img_width, img_width, sen_len)
         alphas = self.restricted_softmax_on_map(ctx_map, sentence_len, not_null_count)
-        # tiled lstm (?, img_width, img_width, sen_len, hidden_dim)
-        expanded_alpha = tf.expand_dims(alphas, axis=4)
 
-        apply_alpha = "sum_with_weight"
+        expanded_alpha = tf.expand_dims(alphas, axis=4)
         weighted_captions = self.get_weighted_caption(apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width,
                                                       lstm_ouput, None, not_null_count)
-
         print("weighed contxt: ", weighted_captions)
         last_lstm = select_from_sequence(lstm_ouput, sentence_len, not_null_count - 1)
         last_lstm_expanded = tf.expand_dims(tf.expand_dims(last_lstm, axis=1), axis=2)
@@ -363,28 +358,28 @@ class TextualAttention(Learner):
         flat_rel = layers.flatten(relevancy_map)
         print("flat rel: ", flat_rel)
         logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
-        # print("sum alphs: ", sum_alpha)
         self.logits = logits
         print("logits: ", self.logits)
 
         # reward assignment
-        summed_alpha = tf.reduce_max(tf.reduce_max(alphas, axis=1), axis=1)
+        summed_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1), axis=1)
         overall_alpha = summed_alpha / tf.cast(img_width * img_width, tf.float32)
-        print("overall alpha:", overall_alpha)
+        self.alpha_map = alphas
         self.alphas = overall_alpha
+        print("overall alpha:", overall_alpha)
         tf.add_to_collection(self.attention_cname, self.alphas)
 
-        print("final alpahas: ", self.alphas)
         self.rewards = get_rewards_over_words(self.logits, self.alphas)
         self.relevancy_map = relevancy_map
 
     def get_weighted_caption(self, apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width, lstm_ouput,
                              lstm_word_ctx, not_null_count):
+
         if apply_alpha == "sum_with_weight":
             print("Expected lstm output")
             expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_ouput, axis=1), axis=2)
             tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
-            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,axis=3)  # (?, img_width, img_width, hidden_dim)
+            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)
 
         elif apply_alpha == "embedding":
             print("Weighting raw embedding")
@@ -398,11 +393,9 @@ class TextualAttention(Learner):
 
             different_lstm = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
                                                        scope="different_lstm")
-
             expanded_lstm_caption = tf.expand_dims(tf.expand_dims(different_lstm, axis=1), axis=2)
             tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
-            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,
-                                              axis=3)  # (?, img_width, img_width, hidden_dim)
+            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)
         else:
             print("Same lstm context is now weighted...")
             expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
