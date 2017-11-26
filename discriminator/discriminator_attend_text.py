@@ -368,7 +368,7 @@ class TextualAttention(Learner):
         print("logits: ", self.logits)
 
         # reward assignment
-        summed_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1), axis=1)
+        summed_alpha = tf.reduce_max(tf.reduce_max(alphas, axis=1), axis=1)
         overall_alpha = summed_alpha / tf.cast(img_width * img_width, tf.float32)
         print("overall alpha:", overall_alpha)
         self.alphas = overall_alpha
