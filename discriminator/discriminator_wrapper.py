@@ -149,7 +149,7 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 5 == 0:
+            if i % 100 == 0:
                 print("iter {}, loss: {}".format(i, output.loss))
                 if self.discr.is_classification:
                     self.print_classification_result(demo_or_sampled_batch, output.pred, "train")
@@ -215,6 +215,17 @@ class DiscriminatorWrapper(object):
         caption_batch = np.concatenate([caption_batch1, caption_batch2], axis=0)
         demo_or_sampled_batch = np.concatenate([demo_or_sampled_batch1, demo_or_sampled_batch2], axis=0)
         return image_idx_batch, caption_batch, demo_or_sampled_batch
+
+    def assign_average_reward_per_sentence(self, sess, img_idxs, caption_sentences,
+                                           image_idx_from_training=True,
+                                           to_examine=False,
+                                           max_step=16):
+
+        _, _, per_sentence_reward = self.assign_reward(self, sess, img_idxs, caption_sentences,
+                                                       image_idx_from_training=image_idx_from_training,
+                                                       to_examine=to_examine,
+                                                       max_step=max_step)
+        return per_sentence_reward
 
     def assign_reward(self, sess, img_idxs, caption_sentences,
                       image_idx_from_training=True,
