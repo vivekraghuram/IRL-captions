@@ -330,16 +330,24 @@ class TextualAttention(Learner):
         # tiled lstm (?, img_width, img_width, sen_len, hidden_dim)
         expanded_alpha = tf.expand_dims(alphas, axis=4)
 
-        apply_alpha = ""
+        apply_alpha = "sum_with_weight"
         weighted_captions = self.get_weighted_caption(apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width,
                                                       lstm_ouput, lstm_word_ctx, not_null_count)
 
         print("weighed contxt: ", weighted_captions)
+        last_lstm = select_from_sequence(lstm_ouput, sentence_len, not_null_count - 1)
+        last_lstm_expanded = tf.expand_dims(tf.expand_dims(last_lstm, axis=1), axis=2)
+        last_lstm_expanded = tf.tile(last_lstm_expanded, [1, img_width, img_width, 1])
+        print("last expanded: ", last_lstm_expanded)
+
+        to_dot = weighted_captions + last_lstm_expanded
+
+        print("to dot: ", to_dot)
 
         with tf.variable_scope("img_proj1"):
             image_proj1 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
 
-        relevancy_map = tf.reduce_sum(weighted_captions * image_proj1, axis=3)
+        relevancy_map = tf.reduce_sum(to_dot * image_proj1, axis=3)
 
         print("relevancy map: ", relevancy_map)
         flat_rel = layers.flatten(relevancy_map)
@@ -363,11 +371,10 @@ class TextualAttention(Learner):
                              lstm_word_ctx, not_null_count):
         if apply_alpha == "sum_with_weight":
             print("Expected lstm output")
-            lstm_caption = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_caption")
-            expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_caption, axis=1), axis=2)
+            expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_ouput, axis=1), axis=2)
             tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
-            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,
-                                              axis=3)  # (?, img_width, img_width, hidden_dim)
+            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,axis=3)  # (?, img_width, img_width, hidden_dim)
+
         elif apply_alpha == "embedding":
             print("Weighting raw embedding")
             transform_embedding = layer_utils.affine_transform(caption_input, self.hidden_dim,
@@ -380,6 +387,7 @@ class TextualAttention(Learner):
 
             different_lstm = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
                                                        scope="different_lstm")
+
             expanded_lstm_caption = tf.expand_dims(tf.expand_dims(different_lstm, axis=1), axis=2)
             tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
             weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,

@@ -149,7 +149,7 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 100 == 0:
+            if i % 5 == 0:
                 print("iter {}, loss: {}".format(i, output.loss))
                 if self.discr.is_classification:
                     self.print_classification_result(demo_or_sampled_batch, output.pred, "train")
