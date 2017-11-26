@@ -167,11 +167,10 @@ class TextualAttention(object):
 
     def _caption_lstm_output(self, caption_input, not_null_count, hidden_dim, scope, is_bidirectional=False):
 
-        init_state_template = tf.identity(caption_input[:, 0])
-        zero_init_state = layer_utils.affine_transform(init_state_template, hidden_dim, scope="init") * 0
-
-        seq_len = tf.cast(not_null_count, tf.int32)
         with tf.variable_scope("bi_{}".format(scope)):
+            init_state_template = tf.identity(caption_input[:, 0])
+            zero_init_state = layer_utils.affine_transform(init_state_template, hidden_dim, scope="init") * 0
+            seq_len = tf.cast(not_null_count, tf.int32)
 
             cell_fw = tf.nn.rnn_cell.LSTMCell(hidden_dim)
             init_fw = tf.nn.rnn_cell.LSTMStateTuple(zero_init_state, zero_init_state)
@@ -315,30 +314,66 @@ class TextualAttention(object):
         # alphas (?, img_width, img_width, sen_len)
         alphas = self.restricted_softmax_on_map(ctx_map, sentence_len, not_null_count)
         # tiled lstm (?, img_width, img_width, sen_len, hidden_dim)
-        tiled_lstm = tf.tile(expanded_lstm_ctx, [1, img_width, img_width, 1, 1])
         expanded_alpha = tf.expand_dims(alphas, axis=4)
-        weighted_ctx = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)  # (?, img_width, img_width, hidden_dim)
-        print("weighed contxt: ", weighted_ctx)
 
-        summed_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1), axis=1)
-        overall_alpha = summed_alpha / tf.cast(img_width * img_width, tf.float32)
-        print("overall alpha:", overall_alpha)
-        self.alphas = overall_alpha
+        apply_alpha = ""
+        weighted_captions = self.get_weighted_caption(apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width,
+                                                      lstm_ouput, lstm_word_ctx, not_null_count)
+
+        print("weighed contxt: ", weighted_captions)
 
         with tf.variable_scope("img_proj1"):
             image_proj1 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
-        relevancy_map = tf.reduce_sum(weighted_ctx * image_proj1, axis=3)
+        relevancy_map = tf.reduce_sum(weighted_captions * image_proj1, axis=3)
         print("relevancy map: ", relevancy_map)
         conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
         flat_rel = layers.flatten(conv_rel)
         print("flat rel: ", flat_rel)
         logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
-        print("final alpahas: ", self.alphas)
         # print("sum alphs: ", sum_alpha)
         tf.add_to_collection(self.attention_cname, self.alphas)
         self.logits = logits
         print("logits: ", self.logits)
+
+        # reward assignment
+        summed_alpha = tf.reduce_sum(tf.reduce_sum(alphas, axis=1), axis=1)
+        overall_alpha = summed_alpha / tf.cast(img_width * img_width, tf.float32)
+        print("overall alpha:", overall_alpha)
+        self.alphas = overall_alpha
+        print("final alpahas: ", self.alphas)
         self.rewards = self.get_rewards_over_words()
+
+    def get_weighted_caption(self, apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width, lstm_ouput,
+                             lstm_word_ctx, not_null_count):
+        if apply_alpha == "sum_with_weight":
+            print("Expected lstm output")
+            lstm_caption = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_caption")
+            expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_caption, axis=1), axis=2)
+            tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
+            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,
+                                              axis=3)  # (?, img_width, img_width, hidden_dim)
+        elif apply_alpha == "embedding":
+            print("Weighting raw embedding")
+            transform_embedding = layer_utils.affine_transform(caption_input, self.hidden_dim,
+                                                               scope="embedding_to_hidden")
+            expanded_caption_input = tf.expand_dims(tf.expand_dims(transform_embedding, axis=1), axis=2)
+            tiled_input = tf.tile(expanded_caption_input, [1, img_width, img_width, 1, 1])
+            weighted_captions = tf.reduce_sum(tiled_input * expanded_alpha, axis=3)
+        elif apply_alpha == "different_lstm":
+            print("Different lstm")
+
+            different_lstm = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
+                                                       scope="different_lstm")
+            expanded_lstm_caption = tf.expand_dims(tf.expand_dims(different_lstm, axis=1), axis=2)
+            tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
+            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,
+                                              axis=3)  # (?, img_width, img_width, hidden_dim)
+        else:
+            expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
+            tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
+            weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)
+
+        return weighted_captions
 
     def build_relevancy_map(self, caption_input, image_input, not_null_count, scope):
 
