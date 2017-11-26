@@ -2,8 +2,8 @@ import numpy as np
 from coco_utils import load_coco_data, decode_captions
 import json
 
-def generate_image_index_to_reference_captions():
-  data = load_coco_data()
+def generate_image_index_to_reference_captions(base_dir="datasets/self_process"):
+  data = load_coco_data(base_dir=base_dir, pca_features=False, is_caption_separated=True)
 
   gts_train = {}
   for cap_idx, img_idx in enumerate(data['train_image_idxs']):
@@ -13,8 +13,8 @@ def generate_image_index_to_reference_captions():
 
     gts_train[img_idx].append({'caption': decode_captions(data['train_captions'][cap_idx][1:], data['idx_to_word'])})
 
-  with open('train_img_idx_to_captions.json', 'wb') as f:
-    f.write(json.dumps(gts_train).encode('ascii'))
+  with open('train_img_idx_to_captions.json', 'w') as f:
+    f.write(json.dumps(gts_train))
 
 
   gts_val = {}
@@ -25,8 +25,8 @@ def generate_image_index_to_reference_captions():
 
     gts_val[img_idx].append({'caption': decode_captions(data['val_captions'][cap_idx][1:], data['idx_to_word'])})
 
-  with open('val_img_idx_to_captions.json', 'wb') as f:
-    f.write(json.dumps(gts_val).encode('ascii'))
+  with open('val_img_idx_to_captions.json', 'w') as f:
+    f.write(json.dumps(gts_val))
 
 
 class GeneratorData(object):
@@ -36,11 +36,12 @@ class GeneratorData(object):
                batch_size=50,
                START_TOKEN='<START>',
                END_TOKEN='<END>',
-               NULL_TOKEN='<NULL>'):
+               NULL_TOKEN='<NULL>',
+               UNK_TOKEN='<UNK>'):
     self.mode = mode
     self.batch_size = batch_size
 
-    self.data = load_coco_data(pca_features=False)
+    self.data = load_coco_data(base_dir="datasets/self_process", pca_features=False, is_caption_separated=True)
 
     self.vocab_dim          = len(self.data['word_to_idx'])
     self.image_feature_dim  = self.data['val_features'].shape[1]
@@ -49,16 +50,16 @@ class GeneratorData(object):
     self.NULL_ID  = self.data['word_to_idx'][NULL_TOKEN]
     self.START_ID = self.data['word_to_idx'][START_TOKEN]
     self.END_ID   = self.data['word_to_idx'][END_TOKEN]
+    self.UNK_ID   = self.data['word_to_idx'][UNK_TOKEN]
 
     self.valid_splits = ['val', 'train']
     self.index_orders = {}
     self.prep_index_orders()
 
-    with open('train_img_idx_to_captions.json', 'rb') as f:
-      self.data['train_image_idx_to_captions'] = json.load(f)
+    self.build_image_idx_to_caption_idxs('train')
+    self.build_image_idx_to_caption_idxs('val')
 
-    with open('val_img_idx_to_captions.json', 'rb') as f:
-      self.data['val_image_idx_to_captions'] = json.load(f)
+    self.caption_length = self.data['train_captions'].shape[1]
 
   @property
   def training_batches(self):
@@ -77,6 +78,14 @@ class GeneratorData(object):
   @property
   def word_embedding(self):
     return self.data['word_embedding']
+
+  def build_image_idx_to_caption_idxs(self, split):
+    map_dict = {}
+    for cap_idx, img_idx in enumerate(self.data['%s_image_idxs' % split]):
+      if img_idx not in map_dict:
+        map_dict[img_idx] = []
+      map_dict[img_idx].append(cap_idx)
+    self.data['%s_image_idx_to_caption_idxs' % split] = map_dict
 
   def decode(self, seq):
     singleton = False
@@ -99,6 +108,17 @@ class GeneratorData(object):
     if singleton:
       decoded = decoded[0]
     return decoded
+
+  def encode(self, captions):
+    caption_ids = np.ones((len(captions), self.caption_length), dtype=np.int) * self.NULL_ID
+    for i, c in enumerate(captions):
+      for j, tk in enumerate(c):
+        if tk not in self.data['word_to_idx']:
+          tk_idx = self.UNK_ID
+        else:
+          tk_idx = self.data['word_to_idx'][tk]
+        caption_ids[i, j] = tk_idx
+    return caption_ids
 
   def shuffle(self):
     """ Randomly shuffles the data """
@@ -149,24 +169,35 @@ class GeneratorData(object):
     return self.sample_mle_minibatch(mask, split)
 
   def sample_mle_minibatch(self, mask, split):
+    mask = np.random.choice(self.split_size(split), self.batch_size)
     captions = self.data['%s_captions' % split][mask]
     image_idxs = self.data['%s_image_idxs' % split][mask]
     image_features = self.data['%s_features' % split][image_idxs]
     train_captions, target_captions, target_mask = self.get_train_target_caption(captions)
     if split == 'val':
-      training_captions = np.ones((self.batch_size, 1)) * self.START_ID
+      train_captions = np.ones((self.batch_size, 1)) * self.START_ID
     return image_features, train_captions, target_captions, target_mask
 
   def sample_pg_minibatch(self, mask, split):
+    mask = np.sort(mask)
+    assert(mask.shape[0] == self.batch_size)
     image_features = self.data['%s_features' % split][mask]
-    keys = []
-    captions = {}
-    for idx in mask:
-      keys.append(str(idx))
-      captions[keys[-1]] = self.data['%s_image_idx_to_captions' % split][keys[-1]]
+    keys, all_ref_captions, input_captions = [], {}, np.zeros((self.batch_size, self.caption_length - 1))
+    for idx, data_idx in enumerate(mask):
+      data_idx = int(data_idx)
+      keys.append(data_idx)
+      all_ref_captions[data_idx] = []
+      caption_idxs = self.data['%s_image_idx_to_caption_idxs' % split][data_idx]
+      train_captions, target_captions, _ = self.get_train_target_caption(self.data['%s_captions' % split][caption_idxs])
 
-    inputs = np.ones((self.batch_size, 1)) * self.START_ID
-    return image_features, inputs, captions, keys
+      decoded_target_captions = self.decode(target_captions)
+      for caption in decoded_target_captions:
+        all_ref_captions[data_idx].append({'caption': caption})
+
+      input_captions[idx] = train_captions[np.random.choice(train_captions.shape[0])]
+
+    assert(keys == sorted(keys))
+    return image_features, input_captions, all_ref_captions, keys
 
   def get_train_target_caption(self, train_captions_as_word_ids):
     """
