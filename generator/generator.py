@@ -30,12 +30,12 @@ class Generator(object):
     cell = tf.contrib.rnn.LSTMCell(self.gen_spec.hidden_dim, forget_bias=0.0)
     self.ph_image_feat_input = tf.placeholder(tf.float32, (self.gen_spec.batch_size, self.gen_spec.image_feature_dim), "ph_image_feat_input")
     output, state = cell(self.ph_image_feat_input, cell.zero_state(self.gen_spec.batch_size, dtype=tf.float32))
-    self.initial_cell_state = tf.identity(state[0], name='initial_cell_state')
-    self.initial_hidden_state = tf.identity(state[1], name='initial_hidden_state')
+    self.initial_cell_state = tf.identity(state.c, name='initial_cell_state')
+    self.initial_hidden_state = tf.identity(state.h, name='initial_hidden_state')
 
     return tf.cond(self.ph_initial_step,
                    lambda: state,
-                   lambda: tf.nn.rnn_cell.LSTMStateTuple(self.ph_hidden_state, self.ph_cell_state))
+                   lambda: tf.nn.rnn_cell.LSTMStateTuple(self.ph_cell_state, self.ph_hidden_state))
 
   def build_cell(self):
     return tf.contrib.rnn.LSTMCell(self.gen_spec.hidden_dim, forget_bias=0.0)

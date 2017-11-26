@@ -2,10 +2,6 @@ import numpy as np
 import tensorflow as tf
 from cococaption.pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 from cococaption.pycocoevalcap.cider.cider import Cider
-# from cococaption.pycocoevalcap.spice.spice import Spice
-# from cococaption.pycocoevalcap.bleu.bleu import Bleu
-# from cococaption.pycocoevalcap.rouge.rouge import Rouge
-# from cococaption.pycocoevalcap.meteor.meteor import Meteor
 from collections import namedtuple
 from generator.generator import Generator
 
@@ -217,8 +213,8 @@ class GeneratorWrapper(object):
         observation_cell_state[:, i, :] = feed_dict[self.generator.ph_cell_state]
 
         feed_dict[self.generator.ph_initial_step] = False
-        feed_dict[self.generator.ph_hidden_state] = rs[0]
-        feed_dict[self.generator.ph_cell_state] = rs[1]
+        feed_dict[self.generator.ph_hidden_state] = rs.h
+        feed_dict[self.generator.ph_cell_state] = rs.c
         feed_dict[self.generator.ph_input] = caption_input[:, i:i+1]#ac
 
       end_mask = ((1 - np.cumsum(actions == data.END_ID, axis=1) + (actions == data.END_ID)) == 1).astype(int)
@@ -287,8 +283,8 @@ class GeneratorWrapper(object):
           for k in range(i + 1, self.gen_spec.n_seq_steps):
             ac, rs = sess.run([self.generator.sampled_ac, self.generator.rnn_state], feed_dict=feed_dict)
 
-            feed_dict[self.generator.ph_hidden_state] = rs[0]
-            feed_dict[self.generator.ph_cell_state] = rs[1]
+            feed_dict[self.generator.ph_hidden_state] = rs.h
+            feed_dict[self.generator.ph_cell_state] = rs.c
             feed_dict[self.generator.ph_input] = caption_input[:, k:k+1]#ac
 
             sampled_actions[:, k] = ac[:, 0]
@@ -347,8 +343,8 @@ class GeneratorWrapper(object):
                               feed_dict=feed_dict)
 
         feed_dict[self.generator.ph_initial_step] = False
-        feed_dict[self.generator.ph_hidden_state] = rs[0]
-        feed_dict[self.generator.ph_cell_state] = rs[1]
+        feed_dict[self.generator.ph_hidden_state] = rs.h
+        feed_dict[self.generator.ph_cell_state] = rs.c
 
         assert(p.shape[1] == 1 and p.shape[0] == self.gen_spec.batch_size)
         assert(l.shape[2] == self.gen_spec.output_dim and l.shape[0] == self.gen_spec.batch_size)
