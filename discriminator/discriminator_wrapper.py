@@ -38,6 +38,8 @@ class DiscriminatorWrapper(object):
         self.train_data = train_data
         self.val_data = val_data
         self.vocab_data = vocab_data
+        if learner_type is None:
+            learner_type = DiscriminatorWrapper.vanilla_classification_type_key
 
         self.learner_type = learner_type
         self.demo_batcher, self.sampled_batcher = create_demo_sampled_batcher(self.train_data)
@@ -303,6 +305,8 @@ class DiscriminatorWrapper(object):
         def examine_reward_by_attentional_word(i, img_idx, cap, reward, mean_reward):
             is_demo = demo_or_sampled[i]
             print(text_mean_reward(i, is_demo, mean_reward))
+            print("sec_loss: ", output.etc_map["secondary_loss"])
+
             self.show_image_by_image_idxs(coco_data, [img_idx])
             decoded = self.vocab_data.decode_captions(cap).split()
             for (j, k, l) in zip(decoded, reward, output.attention[i]):

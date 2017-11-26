@@ -255,10 +255,12 @@ class BaseDiscriminator(object):
 
         self.alphas = None
         self.pred_labels = None
+        self.secondary_loss = None
         self.other_info_map = None
 
         max_reward_opt_tname = "adam_max_reward"
         results_tensor_cname = "rewards_and_loss"
+        other_tensor_cname = "other_tensors"
 
         if graph is not None:
             result_collection = graph.get_collection(results_tensor_cname)
@@ -266,6 +268,11 @@ class BaseDiscriminator(object):
             self.masked_reward = result_collection[1]
             self.mean_reward_per_sentence = result_collection[2]
             self.pred_labels = result_collection[3]
+            other_info_map = self._get_other_info_map()
+            other_tensor_collection = graph.get_collection(other_tensor_cname)
+            for i, key in zip(range(len(other_info_map)), sorted(other_info_map)):
+                other_info_map[key] = other_tensor_collection[i]
+            self.other_info_map = other_info_map
 
             self.alphas = self.learner_model.get_alphas(graph) if self.is_attention else tf.constant(0)
             self.update_op = graph.get_operation_by_name(max_reward_opt_tname)
@@ -275,6 +282,10 @@ class BaseDiscriminator(object):
             self.loss, self.masked_reward, self.mean_reward_per_sentence = rewards_and_loss
             self.pred_labels = self._pred() if is_classification else tf.constant(-1)
             self.other_info_map = self._get_other_info_map()
+            other_tensors = []
+            for key in sorted(self.other_info_map):
+                other_tensors.append(self.other_info_map[key])
+            [tf.add_to_collection(other_tensor_cname, t) for t in other_tensors]
 
             result_tensors = rewards_and_loss + tuple([self.pred_labels])
             [tf.add_to_collection(results_tensor_cname, t) for t in result_tensors]
@@ -313,16 +324,22 @@ class BaseDiscriminator(object):
 
     def train(self, sess):
 
-        tensors_to_run = list([self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels])
+        tensors_to_run = list(
+            [self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas,
+             self.pred_labels])
         tensors_to_run.append(self.other_info_map)
-        _, loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run, feed_dict=self._get_feed_dict())
+        _, loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run,
+                                                                                                    feed_dict=self._get_feed_dict())
 
         return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results)
 
     def test(self, sess):
-        tensors_to_run = list([self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels])
+        tensors_to_run = list(
+            [self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels])
         tensors_to_run.append(self.other_info_map)
-        loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run, feed_dict=self._get_feed_dict())
+
+        loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run,
+                                                                                                 feed_dict=self._get_feed_dict())
         return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results)
 
     def save_model(self, sess, model_name):

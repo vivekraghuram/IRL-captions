@@ -29,7 +29,18 @@ def restricted_softmax_on_sequence(logits, sentence_length, not_null_count):
     return tf.nn.softmax(logits + large_neg_on_empty)
 
 
-class VanillaDotProduct(object):
+def get_rewards_over_words(logits, alphas):
+    prob_demo = tf.nn.softmax(logits)[:, 1]
+    prob_demo = tf.expand_dims(prob_demo, dim=1)
+    return alphas * prob_demo
+
+
+class Learner(object):
+    def get_other_info(self):
+        return dict()
+
+
+class VanillaDotProduct(Learner):
     def __init__(self, hidden_dim):
         self.hidden_dim = hidden_dim
 
@@ -70,7 +81,8 @@ class VanillaDotProduct(object):
         self.logits = tf.concat([-1 * single_dim_logit, single_dim_logit], axis=1)  # pos 1 is demo
 
         word_relevancy = tf.reduce_sum(tf.expand_dims(self.image_proj, axis=1) * self.lstm_outputs, axis=2)
-        self.rewards = word_relevancy
+
+        self.rewards = get_rewards_over_words(self.logits, alphas=(word_relevancy * 0) + 1)
 
     def get_logits(self):
         return self.logits
@@ -79,8 +91,8 @@ class VanillaDotProduct(object):
         return self.rewards
 
 
-class DiscriminatorClassification(BaseDiscriminator):
 
+class DiscriminatorClassification(BaseDiscriminator):
     def _compute_reward_and_loss(self, reward_config):
         print("Building classification")
         cls = self.build_classification_model()
@@ -103,16 +115,15 @@ class DiscriminatorClassification(BaseDiscriminator):
         if self.is_attention:
             loss = 1 - self.learner_model.get_alphas()
             masked_loss = loss * self.caption_input.get_not_null_numeric_mask()
-            print("masked alpha loss: ", masked_loss)
 
             mean_loss = tf.reduce_sum(masked_loss, axis=-1) / self.caption_input.get_not_null_count()
             batch_loss = tf.reduce_mean(mean_loss)
-            print("batch alpha loss: ", batch_loss)
             batch_loss = batch_loss * 0.5
-            self.batch_sec_loss = batch_loss
-            return batch_loss
+            self.secondary_loss = batch_loss
+            return self.secondary_loss
         else:
-            return 0
+            self.secondary_loss = tf.constant(0, dtype=tf.float32)
+            return self.secondary_loss
 
     def _compute_loss(self, logits, rewards):
 
@@ -134,11 +145,11 @@ class DiscriminatorClassification(BaseDiscriminator):
 
     def _get_other_info_map(self):
         map = dict()
-        map["secondary_loss"] = self.batch_sec_loss
+        map["secondary_loss"] = self.secondary_loss
         map.update(self.learner_model.get_other_info())
         return map
 
-class TextualAttention(object):
+class TextualAttention(Learner):
     model_dilated = "dilated_ctx"
     model_relevancy_map = "rel_map"
 
@@ -268,12 +279,6 @@ class TextualAttention(object):
                                                activation=tf.nn.relu)
             return logits
 
-    def get_rewards_over_words(self):
-
-        prob_demo = tf.nn.softmax(self.logits)[:, 1]
-        prob_demo = tf.expand_dims(prob_demo, dim=1)
-        return self.alphas * prob_demo
-
     def get_logits(self):
         return self.logits
 
@@ -297,7 +302,8 @@ class TextualAttention(object):
 
         ctx_dim = self.hidden_dim
 
-        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim, scope="lstm_output")
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
+                                               scope="lstm_output")
         lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
         print("lstm output: ", lstm_ouput)
         img_ctx = conv_image_context(image_input, ctx_dim)
@@ -350,7 +356,7 @@ class TextualAttention(object):
         print("overall alpha:", overall_alpha)
         self.alphas = overall_alpha
         print("final alpahas: ", self.alphas)
-        self.rewards = self.get_rewards_over_words()
+        self.rewards = get_rewards_over_words(self.logits, self.alphas)
         self.relevancy_map = relevancy_map
 
     def get_weighted_caption(self, apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width, lstm_ouput,
