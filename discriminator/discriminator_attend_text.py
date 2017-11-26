@@ -304,25 +304,35 @@ class TextualAttention(Learner):
 
         lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
                                                scope="lstm_output")
-        lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
-        print("lstm output: ", lstm_ouput)
+
+        rel_score = "multiplicative"
         img_ctx = conv_image_context(image_input, ctx_dim)
+        print("img_ctx: ", img_ctx)
+        expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
 
         sentence_len = tf.shape(caption_input)[1]
         img_width = tf.shape(image_input)[1]
-        print("lstm word ctx: ", lstm_word_ctx)
-        print("img_ctx: ", img_ctx)
 
-        expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
-        expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
+        print("lstm output: ", lstm_ouput)
 
-        print("tiled img: ", expanded_img_ctx)
-        print("tiled lstm: ", expanded_lstm_ctx)
+        if rel_score == "additive":
+            lstm_word_ctx = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_ctx")
+            print("lstm word ctx: ", lstm_word_ctx)
 
-        # element_wise_mul = tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx)
-        # dot-product map (?, img_width, img_width, sen_len)
-        ctx_map = layer_utils.affine_transform(tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx), 1, scope="att")
-        ctx_map = tf.squeeze(ctx_map, axis=-1)
+            expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
+
+            print("tiled img: ", expanded_img_ctx)
+            print("tiled lstm: ", expanded_lstm_ctx)
+
+            # dot-product map (?, img_width, img_width, sen_len)
+            ctx_map = layer_utils.affine_transform(tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx), 1, scope="att")
+            ctx_map = tf.squeeze(ctx_map, axis=-1)
+        elif rel_score == "multiplicative":
+            print("Multiplicative style: ")
+            expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_ouput, axis=1), axis=2)
+            element_wise_mul = tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx)
+            ctx_map = tf.abs(tf.reduce_sum(element_wise_mul, axis=4))
+
         print("ctx map: ", ctx_map)
 
         # alphas (?, img_width, img_width, sen_len)
@@ -332,7 +342,7 @@ class TextualAttention(Learner):
 
         apply_alpha = "sum_with_weight"
         weighted_captions = self.get_weighted_caption(apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width,
-                                                      lstm_ouput, lstm_word_ctx, not_null_count)
+                                                      lstm_ouput, None, not_null_count)
 
         print("weighed contxt: ", weighted_captions)
         last_lstm = select_from_sequence(lstm_ouput, sentence_len, not_null_count - 1)
@@ -354,7 +364,6 @@ class TextualAttention(Learner):
         print("flat rel: ", flat_rel)
         logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
         # print("sum alphs: ", sum_alpha)
-        tf.add_to_collection(self.attention_cname, self.alphas)
         self.logits = logits
         print("logits: ", self.logits)
 
@@ -363,6 +372,8 @@ class TextualAttention(Learner):
         overall_alpha = summed_alpha / tf.cast(img_width * img_width, tf.float32)
         print("overall alpha:", overall_alpha)
         self.alphas = overall_alpha
+        tf.add_to_collection(self.attention_cname, self.alphas)
+
         print("final alpahas: ", self.alphas)
         self.rewards = get_rewards_over_words(self.logits, self.alphas)
         self.relevancy_map = relevancy_map

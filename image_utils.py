@@ -62,7 +62,7 @@ def visualize_attention(im_path, alphas, words):
             plt.text(0, 1, lab, color='black', fontsize=13)
 
             alpha = alphas[i - 1]
-            alpha_img = skimage.transform.pyramid_expand(alpha.reshape(7, 7), upscale=32, sigma=20)
+            alpha_img = create_alpha_img(alpha, shape=alpha.reshape(7, 7), upscale=32)
 
             plt.imshow(img)
             plt.imshow(alpha_img, alpha=0.8)
@@ -72,3 +72,46 @@ def visualize_attention(im_path, alphas, words):
             if pos != 0 or i == n_img - 1:
                 plt.show()
     plt.cla()
+
+
+def create_alpha_img(alpha, shape, upscale, sigma=20):
+    alpha_img = skimage.transform.pyramid_expand(alpha.reshape(shape), upscale, sigma=sigma)
+    return alpha_img
+
+
+def visualize_padded_relevancy(im_path, relevancy_map):
+    def sigmoid(x):
+        return 1 / (1 + np.exp(-x))
+
+    rel_shape = 4
+    assert relevancy_map.shape == (4, 4)
+
+    expected_size = 224
+    padded_size = 256
+
+    rel = sigmoid(relevancy_map * -1)
+
+    pil_img = load_image(im_path)
+    img = image.img_to_array(pil_img).astype(np.uint8)
+
+    padded_img = np.ones((padded_size, padded_size, 3), dtype=np.uint8)
+    diff = padded_size - expected_size
+
+    padded_img[:expected_size, :expected_size, :] = img
+    padded_img[expected_size:padded_size, :expected_size, :] = img[-diff:, :, :]
+    padded_img[:expected_size, expected_size:padded_size, :] = img[:, -diff:, :]
+    padded_img[expected_size:padded_size, expected_size:padded_size] = img[-diff:, -diff:, :]
+
+    alpha_img = create_alpha_img(rel, shape=(rel_shape, rel_shape), upscale=64, sigma=10)
+
+    plt.subplot(1, 2, 1)
+    plt.imshow(padded_img)
+    plt.axis('off')
+
+    plt.subplot(1, 2, 2)
+
+    plt.imshow(padded_img)
+    plt.imshow(alpha_img, alpha=0.8)
+    plt.set_cmap(cm.Greys_r)
+    plt.axis('off')
+    plt.show()

@@ -282,6 +282,7 @@ class BaseDiscriminator(object):
             self.loss, self.masked_reward, self.mean_reward_per_sentence = rewards_and_loss
             self.pred_labels = self._pred() if is_classification else tf.constant(-1)
             self.other_info_map = self._get_other_info_map()
+
             other_tensors = []
             for key in sorted(self.other_info_map):
                 other_tensors.append(self.other_info_map[key])
