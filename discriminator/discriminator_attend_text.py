@@ -1,7 +1,6 @@
 import tensorflow as tf
 import tensorflow.contrib.layers as layers
 import layer_utils
-import math
 
 from discriminator.discriminator import BaseDiscriminator
 
@@ -81,6 +80,7 @@ class VanillaDotProduct(object):
 
 
 class DiscriminatorClassification(BaseDiscriminator):
+
     def _compute_reward_and_loss(self, reward_config):
         print("Building classification")
         cls = self.build_classification_model()
@@ -108,7 +108,9 @@ class DiscriminatorClassification(BaseDiscriminator):
             mean_loss = tf.reduce_sum(masked_loss, axis=-1) / self.caption_input.get_not_null_count()
             batch_loss = tf.reduce_mean(mean_loss)
             print("batch alpha loss: ", batch_loss)
-            return 0.5 * batch_loss
+            batch_loss = batch_loss * 0.5
+            self.batch_sec_loss = batch_loss
+            return batch_loss
         else:
             return 0
 
@@ -130,6 +132,11 @@ class DiscriminatorClassification(BaseDiscriminator):
         argmax = tf.argmax(self._logits, axis=1)
         return argmax
 
+    def _get_other_info_map(self):
+        map = dict()
+        map["secondary_loss"] = self.batch_sec_loss
+        map.update(self.learner_model.get_other_info())
+        return map
 
 class TextualAttention(object):
     model_dilated = "dilated_ctx"
@@ -162,6 +169,7 @@ class TextualAttention(object):
         self.alphas = None
         self.logits = None
         self.rewards = None
+        self.relevancy_map = None
 
         self.attention_cname = "attention_results"
 
@@ -245,6 +253,9 @@ class TextualAttention(object):
         else:
             return self.alphas
 
+    def get_other_info(self):
+        return {"rel_map": self.relevancy_map}
+
     def enriched_image_to_prediction(self, flat_img, pooled_part_num, scope, num_class=2, reuse=False):
 
         un_flattened = tf.reshape(flat_img, [-1, pooled_part_num, pooled_part_num, self.hidden_dim])
@@ -299,9 +310,6 @@ class TextualAttention(object):
         expanded_img_ctx = tf.expand_dims(img_ctx, axis=3)
         expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
 
-        # expanded_img_ctx = tf.tile(expanded_img_ctx, [1, 1, 1, sentence_len, 1])
-        # expanded_lstm_ctx = tf.tile(expanded_lstm_ctx, [1, img_width, img_width, 1, 1])
-
         print("tiled img: ", expanded_img_ctx)
         print("tiled lstm: ", expanded_lstm_ctx)
 
@@ -324,10 +332,11 @@ class TextualAttention(object):
 
         with tf.variable_scope("img_proj1"):
             image_proj1 = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
+
         relevancy_map = tf.reduce_sum(weighted_captions * image_proj1, axis=3)
+
         print("relevancy map: ", relevancy_map)
-        conv_rel = layers.conv2d(relevancy_map, num_outputs=4, kernel_size=3, activation_fn=tf.nn.relu)
-        flat_rel = layers.flatten(conv_rel)
+        flat_rel = layers.flatten(relevancy_map)
         print("flat rel: ", flat_rel)
         logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
         # print("sum alphs: ", sum_alpha)
@@ -342,6 +351,7 @@ class TextualAttention(object):
         self.alphas = overall_alpha
         print("final alpahas: ", self.alphas)
         self.rewards = self.get_rewards_over_words()
+        self.relevancy_map = relevancy_map
 
     def get_weighted_caption(self, apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width, lstm_ouput,
                              lstm_word_ctx, not_null_count):
@@ -369,6 +379,7 @@ class TextualAttention(object):
             weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha,
                                               axis=3)  # (?, img_width, img_width, hidden_dim)
         else:
+            print("Same lstm context is now weighted...")
             expanded_lstm_caption = tf.expand_dims(tf.expand_dims(lstm_word_ctx, axis=1), axis=2)
             tiled_lstm = tf.tile(expanded_lstm_caption, [1, img_width, img_width, 1, 1])
             weighted_captions = tf.reduce_sum(tiled_lstm * expanded_alpha, axis=3)

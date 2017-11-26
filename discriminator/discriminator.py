@@ -221,13 +221,13 @@ class VisualAttention(object):
 
 
 class NetworkOutput(object):
-    def __init__(self, loss, masked_reward, mean_reward_per_sentence, attention, pred):
+    def __init__(self, loss, masked_reward, mean_reward_per_sentence, attention, pred, etc_map):
         self.loss = loss
         self.masked_reward = masked_reward
         self.mean_reward_per_sentence = mean_reward_per_sentence
         self.attention = attention
         self.pred = pred
-
+        self.etc_map = etc_map
 
 
 class BaseDiscriminator(object):
@@ -255,6 +255,7 @@ class BaseDiscriminator(object):
 
         self.alphas = None
         self.pred_labels = None
+        self.other_info_map = None
 
         max_reward_opt_tname = "adam_max_reward"
         results_tensor_cname = "rewards_and_loss"
@@ -273,6 +274,8 @@ class BaseDiscriminator(object):
             rewards_and_loss = self._compute_reward_and_loss(reward_config)
             self.loss, self.masked_reward, self.mean_reward_per_sentence = rewards_and_loss
             self.pred_labels = self._pred() if is_classification else tf.constant(-1)
+            self.other_info_map = self._get_other_info_map()
+
             result_tensors = rewards_and_loss + tuple([self.pred_labels])
             [tf.add_to_collection(results_tensor_cname, t) for t in result_tensors]
 
@@ -299,6 +302,9 @@ class BaseDiscriminator(object):
     def _pred(self):
         pass
 
+    def _get_other_info_map(self):
+        pass
+
     def _get_feed_dict(self):
         feed_dict = {}
         for n_input in [self.caption_input, self.image_input, self.metadata_input]:
@@ -306,17 +312,18 @@ class BaseDiscriminator(object):
         return feed_dict
 
     def train(self, sess):
-        _, loss, masked_reward, mean_reward_per_sentence, attention, pred = sess.run(
-            [self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels],
-            feed_dict=self._get_feed_dict())
 
-        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred)
+        tensors_to_run = list([self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels])
+        tensors_to_run.append(self.other_info_map)
+        _, loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run, feed_dict=self._get_feed_dict())
+
+        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results)
 
     def test(self, sess):
-        loss, masked_reward, mean_reward_per_sentence, attention, pred = sess.run(
-            [self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels],
-            feed_dict=self._get_feed_dict())
-        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred)
+        tensors_to_run = list([self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels])
+        tensors_to_run.append(self.other_info_map)
+        loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run, feed_dict=self._get_feed_dict())
+        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results)
 
     def save_model(self, sess, model_name):
         saver = tf.train.Saver()
