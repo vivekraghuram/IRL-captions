@@ -65,7 +65,7 @@ def visualize_attention(im_path, alphas, words):
             plt.text(0, 1, lab, color='black', fontsize=13)
 
             alpha = alphas[i - 1]
-            alpha_img = create_alpha_img(alpha, shape=alpha.reshape(7, 7), upscale=32)
+            alpha_img = create_alpha_img(alpha, shape=(7, 7), upscale=32)
 
             plt.imshow(img)
             plt.imshow(alpha_img, alpha=0.8)
@@ -115,23 +115,29 @@ def annotate_words(im_path, word_alpha_map, words):
 
 def visualize_padded_relevancy(im_path, relevancy_map):
 
-    rel_shape = 4
-    assert relevancy_map.shape == (rel_shape, rel_shape)
+    need_padding_shape = 4
 
     img = load_image_to_display(im_path)
-    padded_img = pad_same_image(img, expected_size, padded_size)
+
+    if relevancy_map.shape == (need_padding_shape, need_padding_shape):
+        image_to_show = pad_same_image(img, expected_size, padded_size)
+        shape = (need_padding_shape, need_padding_shape)
+        upscale = 64
+    else:
+        image_to_show = img
+        shape = (7 , 7)
+        upscale = 32
 
     rel = expit(relevancy_map * -1)
-
-    alpha_img = create_alpha_img(rel, shape=(rel_shape, rel_shape), upscale=64, sigma=10)
+    alpha_img = create_alpha_img(rel, shape, upscale=upscale, sigma=10)
 
     plt.subplot(1, 2, 1)
-    plt.imshow(padded_img)
+    plt.imshow(image_to_show)
     plt.axis('off')
 
     plt.subplot(1, 2, 2)
 
-    plt.imshow(padded_img)
+    plt.imshow(image_to_show)
     plt.imshow(alpha_img, alpha=0.8)
     plt.set_cmap(cm.Greys_r)
     plt.axis('off')

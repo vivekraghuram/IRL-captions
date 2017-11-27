@@ -81,8 +81,8 @@ class VanillaDotProduct(Learner):
         self.logits = tf.concat([-1 * single_dim_logit, single_dim_logit], axis=1)  # pos 1 is demo
 
         word_relevancy = tf.reduce_sum(tf.expand_dims(self.image_proj, axis=1) * self.lstm_outputs, axis=2)
-
-        self.rewards = get_rewards_over_words(self.logits, alphas=(word_relevancy * 0) + 1)
+        alpha = restricted_softmax_on_sequence(word_relevancy, sentence_length, not_null_count)
+        self.rewards = get_rewards_over_words(self.logits, alphas=alpha)
 
     def get_logits(self):
         return self.logits
@@ -112,13 +112,13 @@ class DiscriminatorClassification(BaseDiscriminator):
 
     def _secondary_loss(self):
         if self.is_attention:
-            loss = 1 - self.learner_model.get_alphas()
-            masked_loss = loss * self.caption_input.get_not_null_numeric_mask()
-
-            mean_loss = tf.reduce_sum(masked_loss, axis=-1) / self.caption_input.get_not_null_count()
-            batch_loss = tf.reduce_mean(mean_loss)
-            batch_loss = batch_loss * 0.1
-            self.secondary_loss = batch_loss
+            # loss = 1 - self.learner_model.get_alphas()
+            # masked_loss = loss * self.caption_input.get_not_null_numeric_mask()
+            #
+            # mean_loss = tf.reduce_sum(masked_loss, axis=-1) / self.caption_input.get_not_null_count()
+            # batch_loss = tf.reduce_mean(mean_loss)
+            # batch_loss = batch_loss * 0.1
+            self.secondary_loss = tf.constant(0, dtype=tf.float32)
             return self.secondary_loss
         else:
             self.secondary_loss = tf.constant(0, dtype=tf.float32)
@@ -251,7 +251,7 @@ class TextualAttention(Learner):
 
     def build(self, caption_input, not_null_count, image_input, scope):
 
-        which_model = TextualAttention.model_dilated
+        which_model = TextualAttention.model_relevancy_map
 
         print("Building {}..".format(which_model))
         if which_model == TextualAttention.model_dilated:
@@ -331,7 +331,7 @@ class TextualAttention(Learner):
         elif rel_score == "multiplicative":
             print("Multiplicative style: ")
             expanded_lstm_ctx = tf.expand_dims(tf.expand_dims(lstm_ouput, axis=1), axis=2)
-            element_wise_mul = tf.nn.relu(expanded_img_ctx + expanded_lstm_ctx)
+            element_wise_mul = tf.nn.relu(expanded_img_ctx * expanded_lstm_ctx)
             ctx_map = tf.reduce_sum(element_wise_mul, axis=4)
         print("ctx map: ", ctx_map)
 
@@ -409,17 +409,15 @@ class TextualAttention(Learner):
 
     def build_relevancy_map(self, caption_input, image_input, not_null_count, scope):
 
-        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, self.hidden_dim,
-                                               scope="lstm_output", is_bidirectional=True)
-
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, self.hidden_dim, scope="lstm_output")
         sentence_length = tf.shape(caption_input)[1]
-        mid_lstm = select_from_sequence(lstm_ouput, sentence_length, (not_null_count / 2))
+        lstm_final = select_from_sequence(lstm_ouput, sentence_length, not_null_count - 1)
 
         with tf.variable_scope("img_proj"):
             image_proj = layer_utils.affine_transform(image_input, self.hidden_dim, scope)
-        image_proj = tf.concat([image_proj, image_proj], axis=-1)
+        mean_img = tf.reduce_mean(tf.reduce_mean(image_proj, axis=2), axis=1)
 
-        final_output_expanded = tf.expand_dims(tf.expand_dims(mid_lstm, axis=1), axis=2)
+        final_output_expanded = tf.expand_dims(tf.expand_dims(lstm_final, axis=1), axis=2)
         word_relevancy = tf.reduce_sum(final_output_expanded * image_proj, axis=3)
 
         print("final lstm expanded: ", final_output_expanded)
@@ -431,10 +429,12 @@ class TextualAttention(Learner):
         print("flat rel: ", flat_rel)
         logits = layer_utils.affine_transform(flat_rel, 2, scope="rel_to_logits")
 
-        mean_img = tf.reduce_mean(tf.reduce_mean(image_proj, axis=2), axis=1)
-        self.alphas = tf.reduce_sum(tf.expand_dims(mean_img, axis=1) * lstm_ouput, axis=2)
+        alpha = tf.reduce_sum(tf.expand_dims(mean_img, axis=1) * lstm_ouput, axis=2)
+        self.alphas = restricted_softmax_on_sequence(alpha, sentence_length, not_null_count)
         tf.add_to_collection(self.attention_cname, self.alphas)
         self.logits = logits
         print("logits: ", self.logits)
 
-        self.rewards = self.get_rewards_over_words()
+        self.alpha_map = tf.constant(0)
+        self.rewards = get_rewards_over_words(logits, self.alphas)
+        self.relevancy_map = relevancy_map

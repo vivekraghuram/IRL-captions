@@ -317,12 +317,13 @@ class DiscriminatorWrapper(object):
             is_demo = demo_or_sampled[i]
             print(text_mean_reward(i, is_demo, mean_reward))
             image_path = coco_data.image_paths[img_idx]
+
             visualize_padded_relevancy(image_path, output.etc_map["rel_map"][i])
             decoded = self.vocab_data.decode_captions(cap).split()
 
-            alpha_map = output.etc_map["alpha_map"][i]
-
-            annotate_words(image_path, alpha_map, decoded)
+            all_alpha_map = output.etc_map["alpha_map"]
+            if all_alpha_map.shape != ():
+                annotate_words(image_path, all_alpha_map[i], decoded)
 
             self.show_image_by_image_idxs(coco_data, [img_idx])
             for (j, k, l) in zip(decoded, reward, output.attention[i]):
