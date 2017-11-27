@@ -59,7 +59,6 @@ class CaptionInput(NetWorkInput):
 
 class ImageInput(NetWorkInput):
     def __init__(self, image_feature_dim, graph=None):
-
         image_input_tname = "image_feat_input"
 
         if graph is not None:
@@ -153,16 +152,17 @@ class LstmScalarRewardStrategy(object):
             self.take_difference = take_difference
 
 
-class AttentiveLstm(object):
-
+class VisualAttention(object):
     def __init__(self,
                  max_sentence_length,
                  image_part_num,
                  image_feature_dim,
+                 hidden_dim,
                  attention_dim):
 
         self.max_sentence_length = max_sentence_length
         self.attention_dim = attention_dim
+        self.hidden_dim = hidden_dim
         self.image_part_num = image_part_num
         self.image_feature_dim = image_feature_dim
         self.output = None
@@ -170,13 +170,15 @@ class AttentiveLstm(object):
 
         self.attention_cname = "attention_results"
 
-    def build(self, caption_embedding, image_input, hidden_dim, scope):
+    def build(self, caption_embedding, image_input, scope):
 
         image_annotations = tf.reshape(image_input, [-1, self.image_part_num, self.image_feature_dim])
 
         with tf.variable_scope(scope):
-            init_hidden_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), hidden_dim, "init_h")
-            init_cell_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), hidden_dim, "init_c")
+            init_hidden_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), self.hidden_dim,
+                                                             "init_h")
+            init_cell_state = layer_utils.affine_transform(tf.reduce_mean(image_annotations, axis=1), self.hidden_dim,
+                                                           "init_c")
             state = tf.nn.rnn_cell.LSTMStateTuple(init_cell_state, init_hidden_state)
             output = init_hidden_state
             with tf.variable_scope("attentive_lstm") as lstm_scope:
@@ -191,9 +193,10 @@ class AttentiveLstm(object):
                     ctx = tf.squeeze(layer_utils.affine_transform(ctx, 1, scope="context"), axis=2)
                     alpha = tf.nn.softmax(ctx)
 
-                    weighted_ctx = tf.reduce_mean(annotation * tf.expand_dims(alpha, 2), axis=1)
+                    weighted_ctx = tf.reduce_sum(annotation * tf.expand_dims(alpha, 2), axis=1)
 
-                    lstm = tf.nn.rnn_cell.LSTMCell(hidden_dim, initializer=tf.random_normal_initializer(stddev=0.03))
+                    lstm = tf.nn.rnn_cell.LSTMCell(self.hidden_dim,
+                                                   initializer=tf.random_normal_initializer(stddev=0.03))
 
                     word_embedding = caption_embedding[:, idx]
                     output, state = lstm(tf.concat([word_embedding, weighted_ctx], axis=1), state)
@@ -216,21 +219,25 @@ class AttentiveLstm(object):
         else:
             return self.alphas
 
-class NetworkOutput(object):
 
-    def __init__(self, loss, masked_reward, mean_reward_per_sentence, attention):
+class NetworkOutput(object):
+    def __init__(self, loss, masked_reward, mean_reward_per_sentence, attention, pred, etc_map):
         self.loss = loss
         self.masked_reward = masked_reward
         self.mean_reward_per_sentence = mean_reward_per_sentence
         self.attention = attention
+        self.pred = pred
+        self.etc_map = etc_map
 
 
-class Discriminator(object):
+class BaseDiscriminator(object):
     def __init__(self,
                  caption_input,
                  image_input,
                  metadata_input,
-                 attention_model=None,
+                 is_attention=False,
+                 is_classification=False,
+                 learner_model=None,
                  reward_config=None,
                  learning_rate=1e-3,
                  hidden_dim=512,
@@ -238,44 +245,139 @@ class Discriminator(object):
                  ):
         self.caption_input = caption_input
         self.image_input = image_input
-        self.attention_model = attention_model
+        self.is_attention = is_attention
+        self.is_classification = is_classification
+        self.learner_model = learner_model
         self.metadata_input = metadata_input
         self.reward_config = reward_config
         self.hidden_dim = hidden_dim
+        self.global_step = tf.Variable(0, name='global_step', trainable=False)
+
+        self.alphas = None
+        self.pred_labels = None
+        self.secondary_loss = None
+        self.other_info_map = None
 
         max_reward_opt_tname = "adam_max_reward"
-        rewards_loss_collection_tname = "rewards_and_loss"
+        results_tensor_cname = "rewards_and_loss"
+        other_tensor_cname = "other_tensors"
 
         if graph is not None:
-            reward_tensors = graph.get_collection(rewards_loss_collection_tname)
-            self.loss = reward_tensors[0]
-            self.masked_reward = reward_tensors[1]
-            self.mean_reward_per_sentence = reward_tensors[2]
+            result_collection = graph.get_collection(results_tensor_cname)
+            self.loss = result_collection[0]
+            self.masked_reward = result_collection[1]
+            self.mean_reward_per_sentence = result_collection[2]
+            self.pred_labels = result_collection[3]
+            other_info_map = self._get_other_info_map()
+            if other_info_map is not None:
+                other_tensor_collection = graph.get_collection(other_tensor_cname)
+                for i, key in zip(range(len(other_info_map)), sorted(other_info_map)):
+                    other_info_map[key] = other_tensor_collection[i]
+                self.other_info_map = other_info_map
 
-            self.alphas = self.attention_model.get_alphas(graph) if attention_model else tf.constant(0)
+            self.alphas = self.learner_model.get_alphas(graph) if self.is_attention else tf.constant(0)
             self.update_op = graph.get_operation_by_name(max_reward_opt_tname)
         else:
-            lstm = self._combine_input_to_lstm()
 
-            rewards = LstmScalarRewardStrategy(lstm.get_output(), reward_config).get_rewards()
-            rewards_and_loss = self._compute_loss(rewards)
+            rewards_and_loss = self._compute_reward_and_loss(reward_config)
             self.loss, self.masked_reward, self.mean_reward_per_sentence = rewards_and_loss
-            [tf.add_to_collection(rewards_loss_collection_tname, t) for t in rewards_and_loss]
+            self.pred_labels = self._pred() if is_classification else tf.constant(-1)
 
-            self.alphas = lstm.get_alphas() if attention_model else tf.constant(0)
-            self.update_op = tf.train.AdamOptimizer(learning_rate, name=max_reward_opt_tname).minimize(self.loss)
+            if self._get_other_info_map() is not None:
+                self.other_info_map = self._get_other_info_map()
+                other_tensors = []
+                for key in sorted(self.other_info_map):
+                    other_tensors.append(self.other_info_map[key])
+                [tf.add_to_collection(other_tensor_cname, t) for t in other_tensors]
+
+            result_tensors = rewards_and_loss + tuple([self.pred_labels])
+            [tf.add_to_collection(results_tensor_cname, t) for t in result_tensors]
+
+            self.alphas = self.learner_model.get_alphas() if self.is_attention else tf.constant(0)
+
+            # loss
+            tvars = tf.trainable_variables()
+            gs, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tvars), 3.0)
+            solver = tf.train.AdamOptimizer(learning_rate)
+            self.update_op = solver.apply_gradients(zip(gs, tvars), global_step=self.global_step,
+                                                    name=max_reward_opt_tname)
+
+    def _compute_reward_and_loss(self, reward_config):
+        """
+        tuple of loss, rewards per token, mean rewards for sentence
+        :param reward_config:
+        :return:
+        loss: scalar loss value for the batch, None
+        rewards: reward per token, [None, max_sentence_len]
+        mean_reward: mean reward per sentence, [None]
+        """
+        pass
+
+    def _pred(self):
+        pass
+
+    def _get_other_info_map(self):
+        pass
+
+    def _get_feed_dict(self):
+        feed_dict = {}
+        for n_input in [self.caption_input, self.image_input, self.metadata_input]:
+            feed_dict.update(n_input.feed())
+        return feed_dict
+
+    def train(self, sess):
+
+        tensors_to_run = list(
+            [self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas,
+             self.pred_labels])
+        other_map = self.other_info_map if self.other_info_map is not None else {"None": tf.constant(0)}
+        tensors_to_run.append(other_map)
+        _, loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run,
+                                                                                                    feed_dict=self._get_feed_dict())
+
+        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results)
+
+    def test(self, sess):
+        tensors_to_run = list(
+            [self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas, self.pred_labels])
+        other_map = self.other_info_map if self.other_info_map is not None else {"None": tf.constant(0)}
+        tensors_to_run.append(other_map)
+
+        loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results = sess.run(tensors_to_run,
+                                                                                                 feed_dict=self._get_feed_dict())
+        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention, pred, other_results)
+
+    def save_model(self, sess, model_name):
+        saver = tf.train.Saver()
+        saver.save(sess, model_name)
+
+
+class DiscriminatorMaxReward(BaseDiscriminator):
+    def _compute_reward_and_loss(self, reward_config):
+        print("Building max reward")
+
+        lstm = self._combine_input_to_lstm()
+        rewards = LstmScalarRewardStrategy(lstm.get_output(), reward_config).get_rewards()
+        return self._compute_loss(rewards)
 
     def _combine_input_to_lstm(self):
-        if self.attention_model is None:
-            image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim, 'image_proj')
+        if self.is_attention:
+            self.learner_model.build(self.caption_input.get_embedding(),
+                                     self.image_input.get_image_features(),
+                                     scope='attention')
+            return self.learner_model
+        else:
+            image_projection = layer_utils.affine_transform(self.image_input.get_image_features(), self.hidden_dim,
+                                                            'image_proj')
             initial_lstm_state = tf.nn.rnn_cell.LSTMStateTuple(image_projection * 0, image_projection)
             return Lstm(self.hidden_dim, initial_lstm_state, self.caption_input.get_embedding())
+
+    def _secondary_loss(self):
+
+        if self.is_attention:
+            return 0.05 * tf.reduce_mean(tf.square(1 - tf.reduce_sum(self.learner_model.get_alphas(), axis=1)))
         else:
-            self.attention_model.build(self.caption_input.get_embedding(),
-                                       self.image_input.get_image_features(),
-                                       self.hidden_dim,
-                                       scope='attention')
-            return self.attention_model
+            return 0
 
     def _compute_loss(self, rewards):
         expanded_signs = self.metadata_input.get_signs()
@@ -286,26 +388,9 @@ class Discriminator(object):
                                                              axis=1) / self.caption_input.get_not_null_count()
         mean_reward = tf.reduce_mean(signed_mean_reward_for_each_sentence)
         loss = mean_reward * - 1
+        loss = loss + self._secondary_loss()
+
         return loss, unsigned_masked_reward, unsigned_mean_reward
 
-    def _get_feed_dict(self):
-        feed_dict = {}
-        for n_input in [self.caption_input, self.image_input, self.metadata_input]:
-            feed_dict.update(n_input.feed())
-        return feed_dict
-
-    def train(self, sess):
-        _, loss, masked_reward, mean_reward_per_sentence, attention = sess.run(
-            [self.update_op, self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas],
-            feed_dict=self._get_feed_dict())
-
-        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention)
-
-    def test(self, sess):
-        loss, masked_reward, mean_reward_per_sentence, attention = sess.run(
-            [self.loss, self.masked_reward, self.mean_reward_per_sentence, self.alphas], feed_dict=self._get_feed_dict())
-        return NetworkOutput(loss, masked_reward, mean_reward_per_sentence, attention)
-
-    def save_model(self, sess, model_name):
-        saver = tf.train.Saver()
-        saver.save(sess, model_name)
+    def _pred(self):
+        raise TypeError("Max reward should not need any prediction")

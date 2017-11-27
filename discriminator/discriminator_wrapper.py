@@ -1,16 +1,36 @@
+import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import tensorflow as tf
 
 import layer_utils
-from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, Discriminator, AttentiveLstm
+from discriminator.discriminator import CaptionInput, ImageInput, MetadataInput, LstmScalarRewardStrategy, \
+    DiscriminatorMaxReward, VisualAttention
+from discriminator.discriminator_attend_text import DiscriminatorClassification, TextualAttention, VanillaDotProduct
 from discriminator.discriminator_data_utils import create_demo_sampled_batcher
 from discriminator.mini_batcher import MiniBatcher, MixedMiniBatcher
-from image_utils import image_from_url
+from image_utils import image_from_url, visualize_attention, visualize_padded_relevancy, annotate_words
+from sklearn.metrics import confusion_matrix, accuracy_score
+
+
+def plot_losses(train_loss, val_loss, title=""):
+    plt.plot(np.arange(0, len(train_loss)), train_loss, 'g', val_loss, 'r')
+    train_loss_patch = mpatches.Patch(color='g', label='train')
+    val_loss_patch = mpatches.Patch(color='r', label='val')
+    plt.legend(handles=[train_loss_patch, val_loss_patch])
+    plt.ylabel('Loss')
+    plt.xlabel('Iter')
+    plt.title(title)
+    plt.show()
 
 
 class DiscriminatorWrapper(object):
+    visual_attn_type_key = "visual_attn"
+    textual_attn_type_key = "textual_attn"
+    vanilla_classification_type_key = "vanilla_cls"
+
     def __init__(self, train_data, val_data, vocab_data,
+                 learner_type=None,
                  hidden_dim=512,
                  load_session=None, saved_model_name=None, model_base_dir="models/discr"):
 
@@ -18,6 +38,10 @@ class DiscriminatorWrapper(object):
         self.train_data = train_data
         self.val_data = val_data
         self.vocab_data = vocab_data
+        if learner_type is None:
+            learner_type = DiscriminatorWrapper.vanilla_classification_type_key
+
+        self.learner_type = learner_type
         self.demo_batcher, self.sampled_batcher = create_demo_sampled_batcher(self.train_data)
         self.val_demo_batcher, self.val_sample_batcher = create_demo_sampled_batcher(self.val_data)
         self.hidden_dim = hidden_dim
@@ -28,53 +52,90 @@ class DiscriminatorWrapper(object):
                 '{}/{}.meta'.format(model_base_dir, saved_model_name))
             saver.restore(load_session, '{}/{}'.format(model_base_dir, saved_model_name))
             graph = load_session.graph
-            caption_input = CaptionInput(word_embedding_init=None, null_id=vocab_data.NULL_ID, graph=graph)
-            image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:], graph=graph)
-            metadata_input = MetadataInput(graph=graph)
-            reward_config = LstmScalarRewardStrategy.RewardConfig(
-                reward_scalar_transformer=lambda x: tf.nn.sigmoid(
-                    layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
-            )
-            attention_model = self.get_attention_model()
-            self.discr = Discriminator(caption_input, image_input, metadata_input,
-                                       attention_model=attention_model,
-                                       reward_config=reward_config,
-                                       hidden_dim=hidden_dim, graph=graph)
         else:
-            caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID)
-            image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:])
-            metadata_input = MetadataInput()
-            reward_config = LstmScalarRewardStrategy.RewardConfig(
-                reward_scalar_transformer=lambda x: tf.nn.sigmoid(
-                    layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
-            )
+            graph = None
 
-            attention_model = self.get_attention_model()
-            self.discr = Discriminator(caption_input, image_input, metadata_input,
-                                       attention_model=attention_model,
-                                       reward_config=reward_config,
-                                       hidden_dim=hidden_dim)
+        caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID,
+                                     graph=graph)
+        image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:], graph=graph)
+        metadata_input = MetadataInput(graph=graph)
+        reward_config = self.default_reward_config()
+
+        self.discr, self.learner = self.build_by_learner_type(caption_input,
+                                                              image_input,
+                                                              metadata_input,
+                                                              hidden_dim,
+                                                              reward_config,
+                                                              graph)
+
+    @staticmethod
+    def default_reward_config():
+        return LstmScalarRewardStrategy.RewardConfig(
+            reward_scalar_transformer=lambda x: tf.nn.tanh(
+                layer_utils.affine_transform(x, 1, 'hidden_to_reward'))
+        )
+
+    def build_by_learner_type(self, caption_input, image_input, metadata_input, hidden_dim, reward_config, graph):
+
+        print("Building learner {}...".format(self.learner_type))
+
+        if self.learner_type == DiscriminatorWrapper.textual_attn_type_key:
+
+            learner = TextualAttention(self.train_data.max_caption_len,
+                                       self.train_data.image_part_num,
+                                       self.train_data.image_feature_dim,
+                                       self.hidden_dim,
+                                       self.hidden_dim)
+
+            discr = DiscriminatorClassification(caption_input, image_input, metadata_input,
+                                                is_attention=True,
+                                                is_classification=True,
+                                                learner_model=learner,
+                                                reward_config=reward_config,
+                                                hidden_dim=hidden_dim, graph=graph)
+        elif self.learner_type == DiscriminatorWrapper.vanilla_classification_type_key:
+
+            learner = VanillaDotProduct(self.hidden_dim)
+            discr = DiscriminatorClassification(caption_input, image_input, metadata_input,
+                                                is_attention=False,
+                                                is_classification=True,
+                                                learner_model=learner,
+                                                reward_config=reward_config,
+                                                hidden_dim=hidden_dim, graph=graph)
+
+        elif self.learner_type == DiscriminatorWrapper.visual_attn_type_key:
+
+            learner = VisualAttention(self.train_data.max_caption_len,
+                                      self.train_data.image_part_num,
+                                      self.train_data.image_feature_dim,
+                                      self.hidden_dim,
+                                      self.hidden_dim)
+
+            discr = DiscriminatorMaxReward(caption_input, image_input, metadata_input,
+                                           is_attention=True,
+                                           learner_model=learner,
+                                           reward_config=reward_config,
+                                           hidden_dim=hidden_dim, graph=graph)
+        else:
+
+            discr = DiscriminatorMaxReward(caption_input, image_input, metadata_input,
+                                           is_attention=False,
+                                           learner_model=None,
+                                           reward_config=reward_config,
+                                           hidden_dim=hidden_dim, graph=graph)
+
+        return discr, learner
 
     def has_attention_model(self):
         return self.train_data.image_part_num is not None
 
-    def get_attention_model(self):
-        if self.train_data.image_part_num:
-            attention_model = AttentiveLstm(self.train_data.max_caption_len,
-                                            self.train_data.image_part_num,
-                                            self.train_data.image_feature_dim,
-                                            self.hidden_dim)
-        else:
-            attention_model = None
-        return attention_model
-
-    def pre_train(self, sess, iter_num=400, batch_size=1000):
+    def pre_train(self, sess, iter_num=400, batch_size=1000, validate=True):
 
         return self.train(sess,
                           self.demo_batcher,
-                          self.sampled_batcher, iter_num, batch_size)
+                          self.sampled_batcher, iter_num, batch_size, validate)
 
-    def train(self, sess, demo_batcher, sampled_batcher, iter_num, batch_size):
+    def train(self, sess, demo_batcher, sampled_batcher, iter_num, batch_size, validate=True):
         train_losses = []
         val_losses = []
 
@@ -88,16 +149,24 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 20 == 0:
-                print("iter {}, loss: {}".format(i, output.loss))
-
             if i % 5 == 0:
-                val_loss = self.examine_validation(sess, batch_size, to_examine=False)
-                val_losses.append(val_loss)
-            else:
-                val_losses.append(val_losses[-1])
+                print("iter {}, loss: {}".format(i, output.loss))
+                if self.discr.is_classification:
+                    self.print_classification_result(demo_or_sampled_batch, output.pred, "train")
+
+            if validate:
+                if i % 5 == 0:
+                    val_loss = self.examine_validation(sess, batch_size, to_examine=False)
+                    val_losses.append(val_loss)
+                else:
+                    val_losses.append(val_losses[-1])
 
         return train_losses, val_losses
+
+    @staticmethod
+    def print_classification_result(demo_or_sampled_batch, pred, split):
+        print("{} accuracy: {}".format(split, accuracy_score(y_true=demo_or_sampled_batch, y_pred=pred)))
+        print(confusion_matrix(y_true=demo_or_sampled_batch, y_pred=pred))
 
     def _train_one_iter(self, sess, image_idx_batch, caption_batch, demo_or_sampled_batch):
         caption_batch = caption_batch[:, 1::]
@@ -147,7 +216,20 @@ class DiscriminatorWrapper(object):
         demo_or_sampled_batch = np.concatenate([demo_or_sampled_batch1, demo_or_sampled_batch2], axis=0)
         return image_idx_batch, caption_batch, demo_or_sampled_batch
 
-    def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=False,
+    def assign_average_reward_per_sentence(self, sess, img_idxs, caption_sentences,
+                                           image_idx_from_training=True,
+                                           to_examine=False,
+                                           max_step=16):
+
+        _, _, per_sentence_reward = self.assign_reward(self, sess, img_idxs, caption_sentences,
+                                                       image_idx_from_training=image_idx_from_training,
+                                                       to_examine=to_examine,
+                                                       max_step=max_step)
+        return per_sentence_reward
+
+    def assign_reward(self, sess, img_idxs, caption_sentences,
+                      image_idx_from_training=True,
+                      to_examine=False,
                       max_step=16):
 
         captions = [c.split() for c in caption_sentences]
@@ -159,16 +241,19 @@ class DiscriminatorWrapper(object):
         image_feats_test = coco_data.get_image_features(img_idxs)
         caption_test = self.vocab_data.encode_captions(captions)
 
-        if self.has_attention_model():
+        if self.learner_type == DiscriminatorWrapper.visual_attn_type_key:
             # max len - 1, without start token during train
-            assert caption_test.shape[0] > (coco_data.max_caption_len - 1), "Attention requires max caption length of {}".format(coco_data.max_caption_len - 1)
+            assert caption_test.shape[1] < (
+                coco_data.max_caption_len - 1), "Attention requires max caption length of {}".format(
+                coco_data.max_caption_len - 1)
             additional = coco_data.max_caption_len - caption_test.shape[1] - 1
             nulls = self.vocab_data.get_null_ids((caption_test.shape[0], additional))
             caption_test = np.concatenate((caption_test, nulls), axis=1)
 
         output = self.run_test(sess, image_feats_test, caption_test)
+
         if to_examine:
-            self.examine(coco_data, img_idxs, caption_test, output.masked_reward, output.mean_reward_per_sentence)
+            self.examine(coco_data, img_idxs, caption_test, output, np.ones(image_feats_test.shape[0]))
 
         if max_step < caption_test.shape[0]:
             rewards = output.masked_reward[:, :max_step]
@@ -184,20 +269,83 @@ class DiscriminatorWrapper(object):
         self.discr.metadata_input.pre_feed(labels=demo_or_sampled_batch)
         return self.discr.test(sess)
 
-    def run_test(self, sess, img_feature_test, caption_test):
+    def run_test(self, sess, img_feature_test, caption_test, labels=None):
         self.discr.image_input.pre_feed(img_feature_test)
         self.discr.caption_input.pre_feed(caption_test)
-        self.discr.metadata_input.pre_feed(labels=np.ones(img_feature_test.shape[0]))
+
+        if labels is None:
+            labels = np.ones(img_feature_test.shape[0])
+        self.discr.metadata_input.pre_feed(labels=labels)
         return self.discr.test(sess)
 
-    def examine(self, coco_data, chosen_img, chosen_caption, chosen_reward_per_token, chosen_mean_reward):
-        for (img_idx, cap, r, me_r) in zip(chosen_img, chosen_caption, chosen_reward_per_token, chosen_mean_reward):
-            print("Avg reward: ", me_r)
+    def _base_examine(self, chosen_img, chosen_caption, output, examine_func):
+        irange = range(len(chosen_img))
+        chosen_reward_per_token = output.masked_reward
+        chosen_mean_reward = output.mean_reward_per_sentence
+
+        for zipped in zip(irange, chosen_img, chosen_caption, chosen_reward_per_token, chosen_mean_reward):
+            examine_func(*zipped)
+
+    def examine(self, coco_data, chosen_img, chosen_caption, output, demo_or_sampled):
+
+        is_classification = self.discr.is_classification
+
+        def two_sf(r):
+            return '%s' % float('%.2g' % r)
+
+        def text_mean_reward(i, is_demo, mean_reward):
+            if is_classification:
+                return "P/G: {}/{} | Avg reward: {}".format(output.pred[i], is_demo, mean_reward)
+            else:
+                return "G: {} | Avg reward: {}".format(is_demo, mean_reward)
+
+        def examine_visual_attention(i, img_idx, cap, reward, mean_reward):
+
+            is_demo = demo_or_sampled[i]
+            decoded = self.vocab_data.decode_captions(cap).split()
+
+            labels = []
+            for (c, r) in zip(decoded, reward):
+                label = "{}: {}".format(c, two_sf(r))
+                labels.append(label)
+
+            print(text_mean_reward(i, is_demo, mean_reward))
+            visualize_attention(coco_data.image_paths[img_idx], output.attention[i], labels)
+            print("- - - -")
+
+        def examine_reward_by_attentional_word(i, img_idx, cap, reward, mean_reward):
+            is_demo = demo_or_sampled[i]
+            print(text_mean_reward(i, is_demo, mean_reward))
+            image_path = coco_data.image_paths[img_idx]
+
+            visualize_padded_relevancy(image_path, output.etc_map["rel_map"][i])
+            decoded = self.vocab_data.decode_captions(cap).split()
+
+            all_alpha_map = output.etc_map["alpha_map"]
+            if all_alpha_map.shape != ():
+                annotate_words(image_path, all_alpha_map[i], decoded)
+
+            self.show_image_by_image_idxs(coco_data, [img_idx])
+            for (j, k, l) in zip(decoded, reward, output.attention[i]):
+                print("{:<15} reward: {:<15} attn: {}".format(j, two_sf(k), two_sf(l)))
+
+            print("- - - -")
+
+        def examine_reward_by_word(i, img_idx, cap, reward, mean_reward):
+            is_demo = demo_or_sampled[i]
+            print(text_mean_reward(i, is_demo, mean_reward))
             self.show_image_by_image_idxs(coco_data, [img_idx])
             decoded = self.vocab_data.decode_captions(cap).split()
-            for (i, j) in zip(decoded, r):
-                print("{:<15} {}".format(i, j))
+            for (j, k) in zip(decoded, reward):
+                print("{:<15} {}".format(j, two_sf(k)))
             print("- - - -")
+
+        if self.learner_type == DiscriminatorWrapper.visual_attn_type_key:
+            return self._base_examine(chosen_img, chosen_caption, output, examine_visual_attention)
+        elif self.learner_type == DiscriminatorWrapper.textual_attn_type_key:
+            return self._base_examine(chosen_img, chosen_caption, output, examine_reward_by_attentional_word)
+        else:
+            return self._base_examine(chosen_img, chosen_caption, output, examine_reward_by_word)
 
     def show_image_by_image_idxs(self, coco_data, img_idxs):
         """
@@ -209,35 +357,16 @@ class DiscriminatorWrapper(object):
             plt.axis('off')
             plt.show()
 
-    def examine_batch_results(self, demo_or_sampled_batch, image_id, caption_batch, reward_per_token,
-                              mean_reward):
-        num_to_examine = 4
-
-        def examine_sample(chosen):
-            print(chosen)
-            chosen_img = image_id[chosen]
-            chosen_cap = caption_batch[chosen]
-            chosen_reward_per_token = reward_per_token[chosen]
-            chosen_mean_reward = mean_reward[chosen]
-
-            self.examine(chosen_img, chosen_cap, chosen_reward_per_token, chosen_mean_reward)
-
-        print("DEMO RESULTS")
-        chosen = np.random.choice(np.where(demo_or_sampled_batch == 1)[0], num_to_examine)
-        examine_sample(chosen)
-        print("\n\nSAMPLED RESULTS")
-        chosen = np.random.choice(np.where(demo_or_sampled_batch == 0)[0], num_to_examine)
-        examine_sample(chosen)
-
-    def examine_validation(self, sess, batch_size=100, to_examine=True):
+    def examine_validation(self, sess, batch_size=100, to_examine=True, print_acc=False):
         image_idx_batch, caption_batch, demo_or_sampled_batch = self.process_mini_batch(self.val_demo_batcher,
                                                                                         self.val_sample_batcher,
                                                                                         batch_size)
         caption_batch = caption_batch[:, 1:]
         output = self.run_validation(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
+        if self.discr.is_classification and print_acc:
+            self.print_classification_result(demo_or_sampled_batch, output.pred, "val")
         if to_examine:
-            self.examine(self.val_data, image_idx_batch, caption_batch, output.masked_reward,
-                         output.mean_reward_per_sentence)
+            self.examine(self.val_data, image_idx_batch, caption_batch, output, demo_or_sampled_batch)
         return output.loss
 
     def save_model(self, sess, model_name):
