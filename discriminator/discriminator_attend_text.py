@@ -12,7 +12,7 @@ def select_from_sequence(sequence, sequence_length, index_pos):
     return final_lstm_output
 
 
-def conv_image_context(image_input, output_size, k_size=2, dilation=2):
+def conv_image_context(image_input, output_size, k_size=2, dilation=1):
     return layers.conv2d(image_input, num_outputs=output_size, kernel_size=k_size, activation_fn=tf.nn.relu,
                          rate=dilation)
 
@@ -117,7 +117,7 @@ class DiscriminatorClassification(BaseDiscriminator):
 
             mean_loss = tf.reduce_sum(masked_loss, axis=-1) / self.caption_input.get_not_null_count()
             batch_loss = tf.reduce_mean(mean_loss)
-            batch_loss = batch_loss * 0.5
+            batch_loss = batch_loss * 0.1
             self.secondary_loss = batch_loss
             return self.secondary_loss
         else:
@@ -292,12 +292,13 @@ class TextualAttention(Learner):
     def _conv_layer(self, img, pool_stride, output_num):
 
         with tf.variable_scope("convnet"):
-            out = layers.convolution2d(img, num_outputs=output_num, kernel_size=3, stride=1, activation_fn=tf.nn.relu)
+            out = layers.convolution2d(img, num_outputs=output_num, kernel_size=2, stride=1, activation_fn=tf.nn.relu)
             out = layers.max_pool2d(out, kernel_size=(2, 2), stride=pool_stride, padding='SAME')
             return out
 
     def build_on_dilated_img_ctx(self, caption_input, image_input, not_null_count, scope):
 
+        not_null_count = not_null_count - 1
         rel_score = "multiplicative"
         apply_alpha = "sum_with_weight"
 
@@ -311,8 +312,8 @@ class TextualAttention(Learner):
         sentence_len = tf.shape(caption_input)[1]
         img_width = tf.shape(image_input)[1]
 
-        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim,
-                                               scope="lstm_output")
+        lstm_ouput = self._caption_lstm_output(caption_input, not_null_count, hidden_dim=self.hidden_dim/2, is_bidirectional=True,scope="lstm_output")
+        lstm_ouput = layer_utils.affine_transform(lstm_ouput, ctx_dim, scope="lstm_fw_bw")
         print("lstm output: ", lstm_ouput)
 
         img_ctx = conv_image_context(image_input, ctx_dim)
@@ -340,12 +341,14 @@ class TextualAttention(Learner):
         weighted_captions = self.get_weighted_caption(apply_alpha, caption_input, ctx_dim, expanded_alpha, img_width,
                                                       lstm_ouput, None, not_null_count)
         print("weighed contxt: ", weighted_captions)
-        last_lstm = select_from_sequence(lstm_ouput, sentence_len, not_null_count - 1)
-        last_lstm_expanded = tf.expand_dims(tf.expand_dims(last_lstm, axis=1), axis=2)
-        last_lstm_expanded = tf.tile(last_lstm_expanded, [1, img_width, img_width, 1])
-        print("last expanded: ", last_lstm_expanded)
 
-        to_dot = weighted_captions + last_lstm_expanded
+        repre_lstm = select_from_sequence(lstm_ouput, sentence_len, not_null_count * 0)
+        repre_lstm = (repre_lstm + select_from_sequence(lstm_ouput, sentence_len, not_null_count)) / 2
+        repre_lstm_expanded = tf.expand_dims(tf.expand_dims(repre_lstm, axis=1), axis=2)
+        repre_lstm_expanded = tf.tile(repre_lstm_expanded, [1, img_width, img_width, 1])
+        print("last expanded: ", repre_lstm_expanded)
+
+        to_dot = weighted_captions + repre_lstm_expanded
 
         print("to dot: ", to_dot)
 
