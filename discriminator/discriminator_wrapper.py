@@ -10,16 +10,20 @@ from image_utils import image_from_url
 
 
 class DiscriminatorWrapper(object):
-    def __init__(self, train_data, val_data, vocab_data,
+    def __init__(self, train_data, bad_data, vocab_data,
                  hidden_dim=512,
                  load_session=None, saved_model_name=None, model_base_dir="models/discr"):
 
         self.model_base_dir = model_base_dir
         self.train_data = train_data
-        self.val_data = val_data
+        self.val_data = train_data
         self.vocab_data = vocab_data
-        self.demo_batcher, self.sampled_batcher = create_demo_sampled_batcher(self.train_data)
-        self.val_demo_batcher, self.val_sample_batcher = create_demo_sampled_batcher(self.val_data)
+
+        data_len = len(train_data.data)
+        bad_data_len = len(bad_data.data)
+        self.demo_batcher = MiniBatcher((np.zeros(data_len), train_data.data, np.ones(data_len)))
+        self.sampled_batcher = MiniBatcher((np.zeros(bad_data_len), bad_data.data, np.zeros(bad_data_len)))
+        self.val_demo_batcher, self.val_sample_batcher = self.demo_batcher, self.sampled_batcher
         self.hidden_dim = hidden_dim
 
         # Build graph
@@ -28,8 +32,8 @@ class DiscriminatorWrapper(object):
                 '{}/{}.meta'.format(model_base_dir, saved_model_name))
             saver.restore(load_session, '{}/{}'.format(model_base_dir, saved_model_name))
             graph = load_session.graph
-            caption_input = CaptionInput(word_embedding_init=None, null_id=vocab_data.NULL_ID, graph=graph)
-            image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:], graph=graph)
+            caption_input = CaptionInput(word_embedding_init=None, null_id=vocab_data.END_ID, graph=graph)
+            image_input = ImageInput(image_feature_dim=train_data.image_feature_dim, graph=graph)
             metadata_input = MetadataInput(graph=graph)
             reward_config = LstmScalarRewardStrategy.RewardConfig(
                 reward_scalar_transformer=lambda x: tf.nn.sigmoid(
@@ -42,7 +46,7 @@ class DiscriminatorWrapper(object):
                                        hidden_dim=hidden_dim, graph=graph)
         else:
             caption_input = CaptionInput(word_embedding_init=vocab_data.embedding(), null_id=vocab_data.NULL_ID)
-            image_input = ImageInput(image_feature_dim=train_data.image_features.shape[1:])
+            image_input = ImageInput(image_feature_dim=train_data.image_feature_dim)
             metadata_input = MetadataInput()
             reward_config = LstmScalarRewardStrategy.RewardConfig(
                 reward_scalar_transformer=lambda x: tf.nn.sigmoid(
@@ -88,7 +92,7 @@ class DiscriminatorWrapper(object):
             output = self._train_one_iter(sess, image_idx_batch, caption_batch, demo_or_sampled_batch)
 
             train_losses.append(output.loss)
-            if i % 20 == 0:
+            if i % 5 == 0 and i > 0:
                 print("iter {}, loss: {}".format(i, output.loss))
 
             if i % 5 == 0:
@@ -117,7 +121,7 @@ class DiscriminatorWrapper(object):
             tokenized[pos] = tk
         return tokenized
 
-    def online_train(self, sess, iter_num, img_idxs, caption_sentences):
+    def online_train(self, sess, iter_num, img_idxs, caption_sentences, batch_size=None):
 
         captions = [self._preprocess_online_train_caption(c) for c in caption_sentences]
         caption_word_idx = self.vocab_data.encode_captions(captions)
@@ -126,8 +130,8 @@ class DiscriminatorWrapper(object):
         # zero label indicating sampled
         new_dat = (img_idxs, caption_word_idx, np.zeros(given_size))
         new_batcher = MiniBatcher(new_dat)
-        mixed_sampled_batcher = MixedMiniBatcher([new_batcher, self.sampled_batcher], [0.25, 0.75])
-        batch_size = given_size
+        mixed_sampled_batcher = MixedMiniBatcher([new_batcher, self.sampled_batcher], [0.8, 0.2])
+        batch_size = batch_size or given_size
 
         return self.train(sess, self.demo_batcher, mixed_sampled_batcher, iter_num, batch_size)
 
@@ -148,7 +152,7 @@ class DiscriminatorWrapper(object):
         return image_idx_batch, caption_batch, demo_or_sampled_batch
 
     def assign_reward(self, sess, img_idxs, caption_sentences, image_idx_from_training=True, to_examine=False,
-                      max_step=16):
+                      max_step=20):
 
         captions = [c.split() for c in caption_sentences]
 

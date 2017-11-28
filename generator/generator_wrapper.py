@@ -4,6 +4,8 @@ from cococaption.pycocoevalcap.tokenizer.ptbtokenizer import PTBTokenizer
 from cococaption.pycocoevalcap.cider.cider import Cider
 from collections import namedtuple
 from generator.generator import Generator
+import math
+from IPython import embed
 
 GeneratorSpec = namedtuple('GeneratorSpec', ['input_dim', 'hidden_dim', 'output_dim', 'rnn_activation',
                                              'image_feature_dim', 'n_seq_steps', 'embedding_init',
@@ -94,8 +96,8 @@ class GeneratorWrapper(object):
       _, c, a = sess.run([self.generator.mle_update_op, self.generator.cross_entropy,
                           self.generator.accuracy], feed_dict=feed_dict)
 
-      if (itr % 10 == 0):
-        print("iter {}, cross-entropy: {}, accuracy: {}".format(itr, c, a))
+      # if (itr % 10 == 0):
+      #   print("iter {}, cross-entropy: {}, accuracy: {}".format(itr, c, a))
 
     return c, a
 
@@ -204,6 +206,15 @@ class GeneratorWrapper(object):
 
         exp_lt = np.exp(np.reshape(lt, (self.gen_spec.batch_size * lt.shape[1], self.gen_spec.output_dim)))
         softmax_lt = exp_lt / np.sum(exp_lt, axis=1, keepdims=True)
+        if np.max(ac) >= 5000:
+          print(i)
+          print(feed_dict[self.generator.ph_input])
+          print(feed_dict[self.generator.ph_image_feat_input])
+          print(feed_dict[self.generator.ph_hidden_state])
+          print(feed_dict[self.generator.ph_cell_state])
+          print(np.max(ac))
+          print(lt)
+          print(softmax_lt.shape)
         probabilities[:, i] = softmax_lt[np.arange(probabilities.shape[0]), ac[:, 0]]
 
         actions[:, i] = ac[:, 0]
@@ -213,9 +224,9 @@ class GeneratorWrapper(object):
         observation_cell_state[:, i, :] = feed_dict[self.generator.ph_cell_state]
 
         feed_dict[self.generator.ph_initial_step] = False
-        feed_dict[self.generator.ph_hidden_state] = rs.h
-        feed_dict[self.generator.ph_cell_state] = rs.c
-        feed_dict[self.generator.ph_input] = caption_input[:, i:i+1]#ac
+        feed_dict[self.generator.ph_hidden_state] = rs[1]
+        feed_dict[self.generator.ph_cell_state] = rs[0]
+        feed_dict[self.generator.ph_input] = ac
 
       end_mask = ((1 - np.cumsum(actions == data.END_ID, axis=1) + (actions == data.END_ID)) == 1).astype(int)
       assert(np.max(end_mask) == 1)
@@ -283,8 +294,8 @@ class GeneratorWrapper(object):
           for k in range(i + 1, self.gen_spec.n_seq_steps):
             ac, rs = sess.run([self.generator.sampled_ac, self.generator.rnn_state], feed_dict=feed_dict)
 
-            feed_dict[self.generator.ph_hidden_state] = rs.h
-            feed_dict[self.generator.ph_cell_state] = rs.c
+            feed_dict[self.generator.ph_hidden_state] = rs[1]
+            feed_dict[self.generator.ph_cell_state] = rs[0]
             feed_dict[self.generator.ph_input] = caption_input[:, k:k+1]#ac
 
             sampled_actions[:, k] = ac[:, 0]
@@ -320,37 +331,45 @@ class GeneratorWrapper(object):
     logits = np.zeros((self.gen_spec.batch_size * num_batches, self.gen_spec.n_seq_steps, self.gen_spec.output_dim), dtype=int)
     img_idxs = np.zeros((self.gen_spec.batch_size * num_batches), dtype=int)
     GT = {}
+    itr = 0
 
-    for itr, mini_batch in enumerate(data.testing_batches):
-      if itr == num_batches:
-        break
+    while itr < num_batches:
+      for mini_batch in data.testing_batches:
+        if itr >= num_batches:
+          break
 
-      image_features, caption_input, captions_GT, img_keys = mini_batch
-      img_idxs[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size] = np.array(img_keys)[:]
-      GT = {**GT, **captions_GT}
+        image_features, caption_input, captions_GT, img_keys = mini_batch
+        img_idxs[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size] = np.array(img_keys)[:]
+        GT = {**GT, **captions_GT}
 
-      feed_dict = {
-        self.generator.ph_input            : caption_input[:, 0:1],
-        self.generator.ph_image_feat_input : image_features,
-        self.generator.ph_hidden_state     : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
-        self.generator.ph_cell_state       : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
-        self.generator.ph_initial_step     : True
-      }
+        feed_dict = {
+          self.generator.ph_input            : caption_input[:, 0:1],
+          self.generator.ph_image_feat_input : image_features,
+          self.generator.ph_hidden_state     : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
+          self.generator.ph_cell_state       : np.zeros((self.gen_spec.batch_size, self.gen_spec.hidden_dim)), # Dummy filler
+          self.generator.ph_initial_step     : True
+        }
 
 
-      for i in range(self.gen_spec.n_seq_steps):
-        p, rs, l = sess.run([self.generator.predictions, self.generator.rnn_state, self.generator.logits],
-                              feed_dict=feed_dict)
+        for i in range(self.gen_spec.n_seq_steps):
+          p, rs, l = sess.run([self.generator.sampled_ac, self.generator.rnn_state, self.generator.logits],
+                                feed_dict=feed_dict)
 
-        feed_dict[self.generator.ph_initial_step] = False
-        feed_dict[self.generator.ph_hidden_state] = rs.h
-        feed_dict[self.generator.ph_cell_state] = rs.c
+          if math.isnan(l[0][0][0]) or l[0][0][0] == np.nan:
+            embed()
 
-        assert(p.shape[1] == 1 and p.shape[0] == self.gen_spec.batch_size)
-        assert(l.shape[2] == self.gen_spec.output_dim and l.shape[0] == self.gen_spec.batch_size)
-        feed_dict[self.generator.ph_input] = p
-        predictions[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size, i] = p[:, 0]
-        logits[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size, i, :] = l[:, 0, :]
+
+          feed_dict[self.generator.ph_initial_step] = False
+          feed_dict[self.generator.ph_hidden_state] = rs[1]
+          feed_dict[self.generator.ph_cell_state] = rs[0]
+
+          assert(p.shape[1] == 1 and p.shape[0] == self.gen_spec.batch_size)
+          assert(l.shape[2] == self.gen_spec.output_dim and l.shape[0] == self.gen_spec.batch_size)
+          feed_dict[self.generator.ph_input] = p
+          predictions[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size, i] = p[:, 0]
+          logits[itr * self.gen_spec.batch_size:(itr + 1) * self.gen_spec.batch_size, i, :] = l[:, 0, :]
+
+        itr += 1
 
 
     return predictions, logits, img_idxs, GT

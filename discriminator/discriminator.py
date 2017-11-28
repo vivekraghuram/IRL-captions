@@ -65,7 +65,7 @@ class ImageInput(NetWorkInput):
         if graph is not None:
             self.image_feat_input = get_tensor_by_name(graph, image_input_tname)
         else:
-            self.image_feat_input = tf.placeholder(shape=tuple([None]) + image_feature_dim, name=image_input_tname,
+            self.image_feat_input = tf.placeholder(shape=(None, image_feature_dim), name=image_input_tname,
                                                    dtype=tf.float32)
 
     def get_image_features(self):
@@ -133,14 +133,15 @@ class LstmScalarRewardStrategy(object):
         self.lstm_output = lstm_output
         tmp_processing = self.lstm_output
 
-        if reward_config.take_difference:
-            tmp_processing = layer_utils.difference_over_time(lstm_output, "incremental_change")
+        # if reward_config.take_difference:
+        #     tmp_processing = layer_utils.difference_over_time(lstm_output, "incremental_change")
 
         if reward_config.reward_scalar_transformer is None:
             reward_scalar_transformer = lambda x: layer_utils.affine_transform(x, 1, 'hidden_to_reward')
         else:
             reward_scalar_transformer = reward_config.reward_scalar_transformer
 
+        # self.scalar_rewards = tf.identity(tf.squeeze(layer_utils.difference_over_time(reward_scalar_transformer(tmp_processing), 'incremental_change'), axis=2), name="scalar_rewards")
         self.scalar_rewards = tf.squeeze(reward_scalar_transformer(tmp_processing), axis=2, name="scalar_rewards")
 
     def get_rewards(self):
@@ -278,14 +279,17 @@ class Discriminator(object):
             return self.attention_model
 
     def _compute_loss(self, rewards):
-        expanded_signs = self.metadata_input.get_signs()
+        expanded_signs = tf.tile(self.metadata_input.get_signs(), [1, tf.shape(rewards)[1]])
+        mse = tf.reduce_sum(tf.square(rewards - expanded_signs) * self.caption_input.get_not_null_numeric_mask(), axis=1) / self.caption_input.get_not_null_count()
         unsigned_masked_reward = rewards * self.caption_input.get_not_null_numeric_mask()
         unsigned_mean_reward = tf.reduce_sum(unsigned_masked_reward, axis=1) / self.caption_input.get_not_null_count()
-        signed_rewards = expanded_signs * unsigned_masked_reward
-        signed_mean_reward_for_each_sentence = tf.reduce_sum(signed_rewards,
-                                                             axis=1) / self.caption_input.get_not_null_count()
-        mean_reward = tf.reduce_mean(signed_mean_reward_for_each_sentence)
-        loss = mean_reward * - 1
+        # signed_rewards = expanded_signs * unsigned_masked_reward
+        # signed_mean_reward_for_each_sentence = tf.reduce_sum(signed_rewards,
+        #                                                      axis=1) / self.caption_input.get_not_null_count()
+        # mean_reward = tf.reduce_mean(signed_mean_reward_for_each_sentence)
+        # loss = mean_reward * - 1
+        # return loss, unsigned_masked_reward, unsigned_mean_reward
+        loss = tf.reduce_mean(mse)
         return loss, unsigned_masked_reward, unsigned_mean_reward
 
     def _get_feed_dict(self):

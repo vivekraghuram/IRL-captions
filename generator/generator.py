@@ -27,7 +27,7 @@ class Generator(object):
     self.ph_hidden_state = tf.placeholder(tf.float32, (self.gen_spec.batch_size, self.gen_spec.hidden_dim), "ph_hidden_state")
     self.ph_cell_state = tf.placeholder(tf.float32, (self.gen_spec.batch_size, self.gen_spec.hidden_dim), "ph_cell_state")
 
-    cell = tf.contrib.rnn.LSTMCell(self.gen_spec.hidden_dim, forget_bias=0.0)
+    cell = tf.contrib.rnn.LSTMCell(self.gen_spec.hidden_dim)
     self.ph_image_feat_input = tf.placeholder(tf.float32, (self.gen_spec.batch_size, self.gen_spec.image_feature_dim), "ph_image_feat_input")
     output, state = cell(self.ph_image_feat_input, cell.zero_state(self.gen_spec.batch_size, dtype=tf.float32))
     self.initial_cell_state = tf.identity(state.c, name='initial_cell_state')
@@ -38,7 +38,7 @@ class Generator(object):
                    lambda: tf.nn.rnn_cell.LSTMStateTuple(self.ph_cell_state, self.ph_hidden_state))
 
   def build_cell(self):
-    return tf.contrib.rnn.LSTMCell(self.gen_spec.hidden_dim, forget_bias=0.0)
+    return tf.contrib.rnn.LSTMCell(self.gen_spec.hidden_dim)
 
   def build_input(self):
     self.ph_input = tf.placeholder(tf.int32, (self.gen_spec.batch_size, None), "ph_input")
@@ -75,11 +75,11 @@ class Generator(object):
 
   def build_pg_loss(self):
     with tf.variable_scope("PG"):
-      multinomial_logits = tf.reshape(self.logits, (tf.shape(self.logits)[0], self.gen_spec.output_dim))
-      self.sampled_ac = tf.reshape(tf.multinomial(multinomial_logits, 1, seed=self.seed),
-                                   (tf.shape(self.logits)[0], 1), name="sampled_ac")
+      logp = tf.log(tf.nn.softmax(tf.reshape(self.logits, (self.gen_spec.batch_size, self.gen_spec.output_dim))))
+      self.sampled_ac = tf.identity(tf.multinomial(logp, 1), name="sampled_ac")
       self.neglogp = tf.identity(tf.nn.sparse_softmax_cross_entropy_with_logits(labels=self.ph_target,
                                                                                 logits=self.logits), name="neglogp")
+      # self.neglogp = tf.identity(tf.cast(self.ph_target, tf.float32) * -logp, name="neglogp")
 
       # Get average cross entropy over caption
       self.ph_adv = tf.placeholder(tf.float32, (self.gen_spec.batch_size, None), "ph_adv")

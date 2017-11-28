@@ -8,6 +8,7 @@ class MiniBatcher(object):
         self.data_size = shapes[0]
         self.batchable_tuple = batchable_tuple
         self.shuffle()
+        self.current = 0
 
     def sample(self, batch_size=100):
         assert batch_size <= self.data_size
@@ -17,9 +18,15 @@ class MiniBatcher(object):
 
     def batches(self, batch_size=100):
         assert batch_size <= self.data_size
-        for i in range(0, self.data_size, batch_size):
+
+        if self.current >= self.data_size:
+            self.current = 0
+
+        start = self.current
+        for i in range(start, self.data_size, batch_size):
             end = min(i + batch_size, self.data_size)
             idx = np.arange(i, end)
+            self.current += (end - i)
             yield tuple([b[idx] for b in self.batchable_tuple])
 
     def shuffle(self):
